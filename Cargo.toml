@@ -1,0 +1,15 @@
+[package]
+name = "snezhnaya-rail"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+axum = "0.8.9"
+chrono = "0.4.45"
+csv = "1.4.0"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+tera = "1.19"
+tokio = { version = "1.53.1", features = ["full"] }
+tower-http = { version = "0.7.0", features = ["fs", "trace"] }
+uuid = { version = "1.24.0", features = ["v4"] }

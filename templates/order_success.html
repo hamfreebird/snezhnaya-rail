@@ -1,0 +1,34 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="success-container">
+  <div class="success-icon"><i class="fas fa-check-circle"></i></div>
+  <h2>占座成功！</h2>
+  <p>您的订单号：<strong>{{ order_id }}</strong></p>
+  <p>请在下述时间内完成支付，否则席位将被释放。</p>
+
+  <div class="countdown-box">
+    <span id="countdown-timer">--:--</span>
+  </div>
+
+  <div class="pay-actions">
+    <a href="/payment/{{ order_id }}" class="btn-primary"><i class="fas fa-credit-card"></i> 立即支付</a>
+    <a href="/" class="btn-secondary"><i class="fas fa-home"></i> 返回首页</a>
+  </div>
+
+  <p class="notice"><i class="fas fa-info-circle"></i> 倒计时结束后若未支付，订单将自动取消。</p>
+</div>
+
+<script>
+  // 从后端获取时间戳（字符串形式）
+  const expireAtStr = "{{ expire_at }}";
+  const expireAt = parseInt(expireAtStr, 10);
+  const timerElement = document.getElementById('countdown-timer');
+
+  if (isNaN(expireAt) || expireAt <= 0) {
+    timerElement.textContent = '时间无效，请联系冬契军';
+  } else {
+    startCountdown(expireAt, timerElement);
+  }
+</script>
+{% endblock %}
