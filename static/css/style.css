@@ -6,17 +6,24 @@
 }
 
 body {
-  font-family: 'Segoe UI', 'Helvetica Neue', Arial, sans-serif;
-  background: #0b0d17;
-  /* 深空底色 */
-  color: #e0e8f0;
-  line-height: 1.6;
+    background: #0b0d17; /* 备用底色 */
+    background-image: url('/static/images/background.jpg');
+    background-size: cover;
+    background-position: center center;
+    background-attachment: fixed;
+    color: #e0e8f0;
+    font-family: 'Segoe UI', 'Helvetica Neue', Arial, sans-serif;
+    line-height: 1.6;
+    margin: 0;
+    padding: 0;
+    min-height: 100vh;
 }
 
+/* 所有主要容器改为半透明，并添加模糊效果（可选） */
 .container {
-  max-width: 1200px;
-  margin: 0 auto;
-  padding: 0 20px;
+    max-width: 1200px;
+    margin: 0 auto;
+    padding: 0 20px;
 }
 
 a {
@@ -26,10 +33,14 @@ a {
 
 /* ===== 顶部导航 ===== */
 .top-bar {
-  background: linear-gradient(135deg, #141a2b 0%, #1f2a44 100%);
-  border-bottom: 2px solid #3a6b8c;
-  padding: 12px 0;
-  box-shadow: 0 2px 12px rgba(0, 180, 216, 0.2);
+    background: rgba(20, 26, 43, 0.75);
+    backdrop-filter: blur(4px); /* 毛玻璃效果（可选） */
+    border-bottom: 2px solid rgba(58, 107, 140, 0.6);
+    box-shadow: 0 2px 12px rgba(0, 180, 216, 0.15);
+    padding: 12px 0;
+    position: sticky;
+    top: 0;
+    z-index: 100;
 }
 
 .top-bar .container {
@@ -75,8 +86,13 @@ a {
 
 /* ===== 主体 ===== */
 .main-content {
-  padding: 30px 0;
-  min-height: 70vh;
+    padding: 30px 0;
+    min-height: 70vh;
+    background: rgba(11, 13, 23, 0.65);
+    backdrop-filter: blur(4px);
+    border-radius: 12px;
+    margin: 20px 0;
+    padding: 30px 20px;
 }
 
 /* ===== 搜索区域 ===== */
@@ -286,13 +302,13 @@ tbody tr:hover {
 
 /* ===== 页脚 ===== */
 footer {
-  background: #0a0f1e;
-  border-top: 1px solid #1a2a40;
-  padding: 20px 0;
-  text-align: center;
-  color: #5a7a8a;
-  font-size: 0.9rem;
-  margin-top: 40px;
+    background: rgba(10, 15, 30, 0.7);
+    backdrop-filter: blur(4px);
+    border-top: 1px solid rgba(26, 42, 64, 0.5);
+    padding: 20px 0;
+    text-align: center;
+    color: #5a7a8a;
+    margin-top: 40px;
 }
 
 /* 订单查询 */
@@ -498,4 +514,144 @@ footer {
 /* 导航栏增加通知图标间距 */
 .nav-links a i {
   margin-right: 5px;
+}
+
+/* 车次状态样式 */
+tr.stopped {
+  background-color: #3d1a1a;
+  color: #ff6b6b;
+}
+
+tr.stopped .btn-booking {
+  background: #6b3a3a;
+  cursor: not-allowed;
+  pointer-events: none;
+}
+
+tr.departed {
+  background-color: #2a2a2a;
+  color: #888;
+}
+
+tr.departed .btn-booking {
+  display: none;
+}
+
+.departed-text,
+.stopped-text {
+  color: #ff6b6b;
+  font-weight: bold;
+}
+
+.departed-text {
+  color: #888;
+}
+
+/* 改签页面 */
+.exchange-container {
+  max-width: 600px;
+  margin: 40px auto;
+}
+
+.exchange-actions {
+  margin-top: 20px;
+  display: flex;
+  gap: 15px;
+}
+
+.btn-danger {
+  background: #8a2a2a;
+  color: white;
+  border: none;
+  padding: 10px 20px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.btn-danger:hover {
+  background: #aa3a3a;
+}
+
+.search-section,
+.train-list table,
+.order-form-container,
+.success-container,
+.query-container,
+.result-container .order-card,
+.payment-container,
+.exchange-container,
+.snezhnaya-intro,
+.notification-item,
+.countdown-box {
+    background: rgba(17, 27, 46, 0.8);
+    backdrop-filter: blur(4px);
+    border: 1px solid rgba(42, 74, 106, 0.5);
+    border-radius: 12px;
+    padding: 20px 25px;
+    margin-bottom: 25px;
+}
+
+/* 表格头额外半透明 */
+thead {
+    background: rgba(26, 42, 64, 0.7);
+}
+
+/* 下拉框、输入框等保持原有深色，但略微半透明 */
+.field-group input,
+.field-group select {
+    background: rgba(12, 20, 36, 0.8);
+    border: 1px solid rgba(42, 74, 106, 0.6);
+    color: #e0f0ff;
+}
+
+/* 按钮保留原样（已是不透明） */
+.btn-primary {
+    background: linear-gradient(135deg, #1f6d8a, #0f4a6a);
+    /* 不透明 */
+}
+
+/* 至冬国介绍文本框半透明 */
+.snezhnaya-intro {
+    background: rgba(26, 34, 56, 0.75);
+}
+
+/* 改签模态框背景半透明 */
+#changeModal > div {
+    background: rgba(26, 34, 56, 0.9) !important;
+    backdrop-filter: blur(8px);
+}
+
+/* 容器 - 全局居中 */
+.container {
+    max-width: 1200px;
+    margin: 0 auto;
+    padding: 0 20px;
+}
+
+/* 主内容 - 居中 + 半透明 */
+.main-content {
+    max-width: 1200px;
+    margin: 20px auto;
+    padding: 30px 20px;
+    background: rgba(11, 13, 23, 0.65);
+    backdrop-filter: blur(4px);
+    border-radius: 12px;
+    min-height: 70vh;
+    width: 100%;
+    box-sizing: border-box;
+}
+
+/* 子块居中（可选） */
+.train-list table,
+.order-form-container,
+.success-container,
+.query-container,
+.result-container .order-card,
+.payment-container,
+.exchange-container,
+.snezhnaya-intro,
+.notification-item {
+    margin-left: auto;
+    margin-right: auto;
+    max-width: 100%;
 }

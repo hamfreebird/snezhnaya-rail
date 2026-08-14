@@ -1,0 +1,83 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="exchange-detail">
+  <h2><i class="fas fa-ticket-alt"></i> 订单详情</h2>
+  <div class="order-card">
+    <p><strong>订单号：</strong>{{ order.id }}</p>
+    <p><strong>车次：</strong>{{ order.train_id }}</p>
+    <p><strong>区间：</strong>{{ order.from_station }} → {{ order.to_station }}</p>
+    <p><strong>乘客：</strong>{{ order.passenger_name }}</p>
+    <p><strong>张数：</strong>{{ order.seat_count }}</p>
+    <p><strong>总价：</strong>{{ order.price }} 摩拉</p>
+    <p><strong>状态：</strong>
+      <span class="status-badge 
+                {%- if order.status == 'Pending' %}pending
+                {%- elif order.status == 'Paid' %}paid
+                {%- else %}cancelled{%- endif %}">
+        {%- if order.status == 'Pending' %}待支付
+        {%- elif order.status == 'Paid' %}已支付
+        {%- else %}已取消/退款{%- endif %}
+      </span>
+    </p>
+  </div>
+
+  {% if can_operate %}
+  <div class="exchange-actions">
+    <!-- 退签 -->
+    <form action="/exchange/refund" method="post" style="display:inline;">
+      <input type="hidden" name="order_id" value="{{ order.id }}">
+      <button type="submit" class="btn-danger" onclick="return confirm('确定要退签吗？');">
+        <i class="fas fa-times"></i> 退签
+      </button>
+    </form>
+    <!-- 改签 -->
+    <button id="changeBtn" class="btn-primary"><i class="fas fa-edit"></i> 改签</button>
+  </div>
+
+  <!-- 改签模态框 -->
+  <div id="changeModal"
+    style="display:none; position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.7); z-index:1000;">
+    <div
+      style="background:#1a2238; max-width:600px; margin:50px auto; padding:30px; border-radius:10px; border:1px solid #2a4a6a;">
+      <h3>改签</h3>
+      <form action="/exchange/change" method="post">
+        <input type="hidden" name="order_id" value="{{ order.id }}">
+        <div class="field-group">
+          <label>新车次</label>
+          <select name="new_train_id" required>
+            <!-- 需从后端动态获取可售车次，此处仅作示例 -->
+            <option value="Z001">Z001</option>
+            <option value="Z003">Z003</option>
+          </select>
+        </div>
+        <div class="field-group">
+          <label>出发站</label>
+          <input type="text" name="new_from" required>
+        </div>
+        <div class="field-group">
+          <label>到达站</label>
+          <input type="text" name="new_to" required>
+        </div>
+        <div class="field-group">
+          <label>张数</label>
+          <input type="number" name="new_seat_count" min="1" value="1" required>
+        </div>
+        <div class="form-actions">
+          <button type="submit" class="btn-primary">确认改签</button>
+          <button type="button" onclick="document.getElementById('changeModal').style.display='none'"
+            class="btn-secondary">取消</button>
+        </div>
+      </form>
+    </div>
+  </div>
+  <script>
+    document.getElementById('changeBtn').addEventListener('click', function () {
+      document.getElementById('changeModal').style.display = 'block';
+    });
+  </script>
+  {% else %}
+  <p class="notice"><i class="fas fa-info-circle"></i> 该订单不可改签或退签（可能已发车或状态异常）。</p>
+  {% endif %}
+</div>
+{% endblock %}

@@ -2,30 +2,31 @@
 
 {% block content %}
 <div class="order-form-container">
-    <h2><i class="fas fa-edit"></i> 填写乘客信息</h2>
-    <div class="train-summary">
-        <p><strong>车次：</strong>{{ train.id }} ({{ from }} → {{ to }})</p>
-        <p><strong>出发时间：</strong>{{ departure }} &nbsp;|&nbsp; <strong>到达时间：</strong>{{ arrival }}</p>
-        <p><strong>票价：</strong>{{ total_price }} 摩拉 &nbsp;|&nbsp; <strong>余票：</strong>{{ min_seats }}</p>
-    </div>
+  <h2><i class="fas fa-edit"></i> 填写乘客信息</h2>
+  <div class="train-summary">
+    <p><strong>车次：</strong>{{ train.id }} ({{ from }} → {{ to }})</p>
+    <p><strong>出发时间：</strong>{{ departure }} &nbsp;|&nbsp; <strong>到达时间：</strong>{{ arrival }}</p>
+    <p><strong>票价：</strong>{{ total_price }} 摩拉 &nbsp;|&nbsp; <strong>余票：</strong>{{ min_seats }}</p>
+  </div>
 
-    <form action="/order/create" method="post" class="order-form">
-        <input type="hidden" name="train_id" value="{{ train.id }}">
-        <input type="hidden" name="from" value="{{ from }}">
-        <input type="hidden" name="to" value="{{ to }}">
-        <input type="hidden" name="total_price" value="{{ total_price }}">
-        <div class="field-group">
-            <label for="passenger_name">乘客姓名</label>
-            <input type="text" id="passenger_name" name="passenger_name" placeholder="请输入全名" required>
-        </div>
-        <div class="field-group">
-            <label for="seat_count">购票张数</label>
-            <input type="number" id="seat_count" name="seat_count" min="1" max="{{ min_seats }}" value="1" required>
-        </div>
-        <div class="form-actions">
-            <button type="submit" class="btn-primary"><i class="fas fa-lock"></i> 提交占座</button>
-            <a href="/" class="btn-secondary"><i class="fas fa-times"></i> 取消</a>
-        </div>
-    </form>
+  <form action="/order/create" method="post" class="order-form">
+    <input type="hidden" name="train_id" value="{{ train.id }}">
+    <input type="hidden" name="from" value="{{ from }}">
+    <input type="hidden" name="to" value="{{ to }}">
+    <input type="hidden" name="total_price" value="{{ total_price }}">
+    <input type="hidden" name="date" value="{{ selected_date }}">
+    <div class="field-group">
+      <label for="passenger_name">乘客姓名</label>
+      <input type="text" id="passenger_name" name="passenger_name" placeholder="请输入全名" required>
+    </div>
+    <div class="field-group">
+      <label for="seat_count">购票张数</label>
+      <input type="number" id="seat_count" name="seat_count" min="1" max="{{ min_seats }}" value="1" required>
+    </div>
+    <div class="form-actions">
+      <button type="submit" class="btn-primary"><i class="fas fa-lock"></i> 提交占座</button>
+      <a href="/" class="btn-secondary"><i class="fas fa-times"></i> 取消</a>
+    </div>
+  </form>
 </div>
 {% endblock %}

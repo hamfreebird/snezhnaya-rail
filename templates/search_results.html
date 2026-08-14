@@ -2,78 +2,80 @@
 
 {% block content %}
 <div class="search-section">
-    <div class="search-box">
-        <form action="/search" method="get" class="search-form">
-            <div class="field-group">
-                <label><i class="fas fa-map-pin"></i> 出发</label>
-                <select name="from" required>
-                    <option value="">请选择</option>
-                    {% for station in stations %}
-                    <option value="{{ station }}" {% if station == from %}selected{% endif %}>{{ station }}</option>
-                    {% endfor %}
-                </select>
-            </div>
-            <div class="field-group">
-                <label><i class="fas fa-arrow-right"></i> 到达</label>
-                <select name="to" required>
-                    <option value="">请选择</option>
-                    {% for station in stations %}
-                    <option value="{{ station }}" {% if station == to %}selected{% endif %}>{{ station }}</option>
-                    {% endfor %}
-                </select>
-            </div>
-            <div class="field-group">
-                <label><i class="fas fa-calendar-alt"></i> 日期</label>
-                <input type="date" name="date" value="{{ today }}">
-            </div>
-            <button type="submit" class="btn-primary">
-                <i class="fas fa-search"></i> 查询
-            </button>
-        </form>
-    </div>
+  <div class="search-box">
+    <form action="/search" method="get" class="search-form">
+      <div class="field-group">
+        <label><i class="fas fa-map-pin"></i> 出发</label>
+        <select name="from" required>
+          <option value="">请选择</option>
+          {% for station in stations %}
+          <option value="{{ station }}" {% if station==from %}selected{% endif %}>{{ station }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div class="field-group">
+        <label><i class="fas fa-arrow-right"></i> 到达</label>
+        <select name="to" required>
+          <option value="">请选择</option>
+          {% for station in stations %}
+          <option value="{{ station }}" {% if station==to %}selected{% endif %}>{{ station }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div class="field-group">
+        <label><i class="fas fa-calendar-alt"></i> 日期</label>
+        <input type="date" name="date" value="{{ selected_date }}">
+      </div>
+      <button type="submit" class="btn-primary">
+        <i class="fas fa-search"></i> 查询
+      </button>
+    </form>
+  </div>
 </div>
 
 <div class="train-list">
-    <h2><i class="fas fa-search"></i> 搜索结果：{{ from }} → {{ to }}</h2>
-    {% if results %}
-    <table>
-        <thead>
-            <tr>
-                <th>车次</th>
-                <th>列车型号</th>
-                <th>出发站</th>
-                <th>到达站</th>
-                <th>出发时间</th>
-                <th>到达时间</th>
-                <th>票价 (摩拉)</th>
-                <th>余票</th>
-                <th>操作</th>
-            </tr>
-        </thead>
-        <tbody>
-            {% for item in results %}
-            <tr>
-                <td><span class="train-id">❄️ {{ item.id }}</span></td>
-                <td>{{ item.model }}</td>
-                <td>{{ item.from }}</td>
-                <td>{{ item.to }}</td>
-                <td>{{ item.departure }}</td>
-                <td>{{ item.arrival }}</td>
-                <td>{{ item.price }}</td>
-                <td>{{ item.seats }}</td>
-                <td>
-                    {% if item.seats > 0 %}
-                    <a href="/order/{{ item.id }}?from={{ item.from }}&to={{ item.to }}" class="btn-booking">预订</a>
-                    {% else %}
-                    <span class="sold-out-text">无票</span>
-                    {% endif %}
-                </td>
-            </tr>
-            {% endfor %}
-        </tbody>
-    </table>
-    {% else %}
-    <p class="no-result"><i class="fas fa-snowflake"></i> 未找到符合条件的车次，可能是暴风雪影响了班次。</p>
-    {% endif %}
+  <h2><i class="fas fa-search"></i> 搜索结果：{{ from }} → {{ to }}</h2>
+  {% if results %}
+  <table>
+    <thead>
+      <tr>
+        <th>车次</th>
+        <th>列车型号</th>
+        <th>出发站</th>
+        <th>到达站</th>
+        <th>出发时间</th>
+        <th>到达时间</th>
+        <th>票价 (摩拉)</th>
+        <th>余票</th>
+        <th>操作</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for item in results %}
+      <tr class="{% if not item.is_selling and not item.is_departed %}stopped{% elif item.is_departed %}departed{% endif %}">
+        <td><span class="train-id">❄️ {{ item.id }}</span></td>
+        <td>{{ item.model }}</td>
+        <td>{{ item.from }}</td>
+        <td>{{ item.to }}</td>
+        <td>{{ item.departure }}</td>
+        <td>{{ item.arrival }}</td>
+        <td>{{ item.price }}</td>
+        <td>{{ item.seats }}</td>
+        <td>
+          {% if item.is_selling %}
+          <a href="/order/{{ item.id }}?from={{ item.from }}&to={{ item.to }}&date={{ selected_date }}" class="btn-booking">预订</a>
+          {% elif item.is_departed %}
+          <span class="departed-text">已发车</span>
+          {% else %}
+          <span class="stopped-text">停止售票</span>
+          {% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="no-result"><i class="fas fa-snowflake"></i> 未找到符合条件的车次，可能是暴风雪影响了班次。</p>
+  {% endif %}
 </div>
 {% endblock %}
