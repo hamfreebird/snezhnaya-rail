@@ -470,3 +470,32 @@ footer {
   line-height: 1.8;
   margin: 0;
 }
+
+/* 通知页面 */
+.notifications-container {
+  max-width: 800px;
+  margin: 0 auto;
+}
+
+.notification-item {
+  background: #111b2e;
+  border: 1px solid #2a4a6a;
+  border-radius: 8px;
+  padding: 20px;
+  margin-bottom: 20px;
+}
+
+.notification-item h3 {
+  color: #aad8ff;
+  margin-bottom: 8px;
+}
+
+.notification-item p {
+  color: #c0d8e8;
+  line-height: 1.6;
+}
+
+/* 导航栏增加通知图标间距 */
+.nav-links a i {
+  margin-right: 5px;
+}

@@ -9,14 +9,16 @@ use chrono::{Duration, Local, Utc};
 use csv::ReaderBuilder;
 use serde::{Deserialize, Serialize};
 use serde_json;
-use std::collections::HashMap;
-use std::collections::HashSet;
-use std::fs::File;
+use std::collections::{HashMap, HashSet};
+use std::fs::{self, File};
 use std::sync::{Arc, RwLock};
+use std::time::{Duration as StdDuration, SystemTime};
 use tera::{Context, Tera};
+use tokio::time;
 use tower_http::services::ServeDir;
 use uuid::Uuid;
 
+// ---------- 数据结构 ----------
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct Train {
     id: String,
@@ -25,8 +27,10 @@ struct Train {
     stations: Vec<String>,
     times: Vec<String>,
     prices: Vec<u32>,
+    weights: Vec<u32>, // 权重列表，与区间一一对应
+    total_seats: u32,
+    // 动态计算的余票（初始分配减去已售），运行时维护
     seats: Vec<u32>,
-    available_seats: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -44,9 +48,15 @@ struct Order {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 enum OrderStatus {
-    Pending, // 占座
+    Pending,
     Paid,
     Cancelled,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct Notification {
+    title: String,
+    content: String,
 }
 
 // ---------- 应用状态 ----------
@@ -54,6 +64,12 @@ struct AppState {
     tera: Tera,
     trains: RwLock<Vec<Train>>,
     orders: RwLock<HashMap<String, Order>>,
+    // 记录每个区间已售出的票数，用于热重载时重新计算余票
+    sold_counts: RwLock<HashMap<(String, usize), u32>>,
+    notifications: RwLock<Vec<Notification>>,
+    // 文件修改时间记录，用于热重载检测
+    train_mtime: RwLock<SystemTime>,
+    notif_mtime: RwLock<SystemTime>,
 }
 
 // ---------- 查询参数 ----------
@@ -64,7 +80,6 @@ struct SearchParams {
     date: Option<String>,
 }
 
-// ---------- 下单表单 ----------
 #[derive(Debug, Deserialize)]
 struct CreateOrderForm {
     train_id: String,
@@ -75,49 +90,8 @@ struct CreateOrderForm {
     seat_count: u32,
 }
 
-fn load_trains_from_csv(path: &str) -> Vec<Train> {
-    let file = File::open(path).expect("无法打开 trains.csv 文件");
-    let mut rdr = ReaderBuilder::new().has_headers(true).from_reader(file);
-    let mut trains = Vec::new();
-
-    for result in rdr.records() {
-        let record = result.expect("CSV 记录解析失败");
-        let id = record[0].to_string();
-        let model = record[1].to_string();
-        let formation = record[2].to_string();
-
-        // 解析列表字段
-        let stations: Vec<String> = record[3].split('-').map(|s| s.to_string()).collect();
-        let times: Vec<String> = record[4].split('-').map(|s| s.to_string()).collect();
-        let prices: Vec<u32> = record[5]
-            .split('-')
-            .map(|s| s.parse().unwrap_or(0))
-            .collect();
-        let seats: Vec<u32> = record[6]
-            .split('-')
-            .map(|s| s.parse().unwrap_or(0))
-            .collect();
-        let available_seats = seats.iter().min().cloned().unwrap_or(0);
-
-        assert_eq!(stations.len(), times.len(), "站点与时间数量不一致");
-        assert_eq!(stations.len() - 1, prices.len(), "票价数量不匹配");
-        assert_eq!(stations.len() - 1, seats.len(), "余票数量不匹配");
-
-        trains.push(Train {
-            id,
-            model,
-            formation,
-            stations,
-            times,
-            prices,
-            seats,
-            available_seats,
-        });
-    }
-    trains
-}
-
-// 查找有效的出发-到达区间，处理重复站点
+// ---------- 辅助函数 ----------
+// 查找有效区间（处理重复站点）
 fn find_interval(train: &Train, from: &str, to: &str) -> Option<(usize, usize)> {
     let from_indices: Vec<usize> = train
         .stations
@@ -143,7 +117,163 @@ fn find_interval(train: &Train, from: &str, to: &str) -> Option<(usize, usize)> 
     None
 }
 
+// 根据权重和总座位数计算每个区间的初始分配票数
+fn compute_initial_seats(weights: &[u32], total_seats: u32) -> Vec<u32> {
+    if weights.is_empty() {
+        return Vec::new();
+    }
+    let sum_weights: u32 = weights.iter().sum();
+    if sum_weights == 0 {
+        // 全零权重，平均分配
+        let base = total_seats / (weights.len() as u32);
+        let remainder = total_seats % (weights.len() as u32);
+        let mut seats = vec![base; weights.len()];
+        for i in 0..remainder as usize {
+            seats[i] += 1;
+        }
+        return seats;
+    }
+    // 按权重比例分配
+    let mut seats = Vec::with_capacity(weights.len());
+    let mut allocated = 0;
+    for (_i, &w) in weights.iter().enumerate() {
+        let share = (total_seats * w) / sum_weights;
+        seats.push(share);
+        allocated += share;
+    }
+    // 将剩余票数（由于取整丢失）分配到权重最大的区间
+    let mut diff = total_seats - allocated;
+    if diff > 0 {
+        // 按权重降序分配
+        let mut indices: Vec<usize> = (0..weights.len()).collect();
+        indices.sort_by_key(|&i| weights[i]);
+        indices.reverse();
+        for &i in &indices {
+            if diff == 0 {
+                break;
+            }
+            seats[i] += 1;
+            diff -= 1;
+        }
+    }
+    seats
+}
+
+// 加载 CSV 并构建 Train 列表（含动态余票初始化）
+fn load_trains_from_csv(path: &str, sold_counts: &HashMap<(String, usize), u32>) -> Vec<Train> {
+    let file = File::open(path).expect("无法打开 trains.csv 文件");
+    let mut rdr = ReaderBuilder::new().has_headers(true).from_reader(file);
+    let mut trains = Vec::new();
+
+    for result in rdr.records() {
+        let record = result.expect("CSV 记录解析失败");
+        let id = record[0].to_string();
+        let model = record[1].to_string();
+        let formation = record[2].to_string();
+
+        let stations: Vec<String> = record[3].split('-').map(|s| s.to_string()).collect();
+        let times: Vec<String> = record[4].split('-').map(|s| s.to_string()).collect();
+        let prices: Vec<u32> = record[5]
+            .split('-')
+            .map(|s| s.parse().unwrap_or(0))
+            .collect();
+        let weights: Vec<u32> = record[6]
+            .split('-')
+            .map(|s| s.parse().unwrap_or(0))
+            .collect();
+        let total_seats: u32 = record[7].parse().unwrap_or(0);
+
+        // 根据权重计算初始分配
+        let initial_seats = compute_initial_seats(&weights, total_seats);
+
+        // 减去已售
+        let mut seats = initial_seats;
+        for (i, seat) in seats.iter_mut().enumerate() {
+            let key = (id.clone(), i);
+            if let Some(&sold) = sold_counts.get(&key) {
+                if sold >= *seat {
+                    *seat = 0;
+                } else {
+                    *seat -= sold;
+                }
+            }
+        }
+
+        trains.push(Train {
+            id,
+            model,
+            formation,
+            stations,
+            times,
+            prices,
+            weights,
+            total_seats,
+            seats,
+        });
+    }
+    trains
+}
+
+// 加载通知文件
+fn load_notifications(path: &str) -> Vec<Notification> {
+    let content = fs::read_to_string(path).unwrap_or_else(|_| "".to_string());
+    let lines: Vec<&str> = content.lines().collect();
+    let mut notifs = Vec::new();
+    let mut i = 0;
+    while i + 1 < lines.len() {
+        let title = lines[i].trim().to_string();
+        let content = lines[i + 1].trim().to_string();
+        if !title.is_empty() || !content.is_empty() {
+            notifs.push(Notification { title, content });
+        }
+        i += 2;
+        // 跳过空行
+        while i < lines.len() && lines[i].trim().is_empty() {
+            i += 1;
+        }
+    }
+    notifs
+}
+
+// 获取文件修改时间
+fn get_mtime(path: &str) -> SystemTime {
+    fs::metadata(path)
+        .and_then(|m| m.modified())
+        .unwrap_or(SystemTime::UNIX_EPOCH)
+}
+
+// 热重载逻辑
+fn reload_all(state: &Arc<AppState>) {
+    // 读锁获取已售数据
+    let sold_counts = state.sold_counts.read().unwrap().clone();
+    // 加载新 trains
+    let new_trains = load_trains_from_csv("trains.csv", &sold_counts);
+    // 加载新通知
+    let new_notifs = load_notifications("notifications.txt");
+
+    // 写锁更新状态
+    {
+        let mut trains = state.trains.write().unwrap();
+        *trains = new_trains;
+    }
+    {
+        let mut notifs = state.notifications.write().unwrap();
+        *notifs = new_notifs;
+    }
+    // 更新文件修改时间记录
+    {
+        let mut mtime = state.train_mtime.write().unwrap();
+        *mtime = get_mtime("trains.csv");
+    }
+    {
+        let mut mtime = state.notif_mtime.write().unwrap();
+        *mtime = get_mtime("notifications.txt");
+    }
+    println!("热重载完成: 更新了车次和通知数据");
+}
+
 // ---------- 路由处理 ----------
+
 async fn index(State(state): State<Arc<AppState>>) -> Response {
     let mut ctx = Context::new();
     ctx.insert("page_title", "至冬国铁路 - 首页");
@@ -160,7 +290,7 @@ async fn index(State(state): State<Arc<AppState>>) -> Response {
     stations_vec.sort();
     ctx.insert("stations", &stations_vec);
 
-    // 构造展示列表（首末站）
+    // 构造展示列表（首末站，取整体最小余票）
     let display_trains: Vec<serde_json::Value> = trains
         .iter()
         .map(|t| {
@@ -182,7 +312,7 @@ async fn index(State(state): State<Arc<AppState>>) -> Response {
         .collect();
     ctx.insert("display_trains", &display_trains);
 
-    let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+    let today = Local::now().format("%Y-%m-%d").to_string();
     ctx.insert("today", &today);
 
     let html = state.tera.render("index.html", &ctx).unwrap();
@@ -219,13 +349,12 @@ async fn search(
         }
     }
 
-    // 模板渲染部分
     let mut ctx = Context::new();
     ctx.insert("page_title", "搜索结果 - 至冬国铁路");
     ctx.insert("results", &results);
     ctx.insert("from", from);
     ctx.insert("to", to);
-    let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+    let today = Local::now().format("%Y-%m-%d").to_string();
     ctx.insert("today", &today);
 
     let mut all_stations = HashSet::new();
@@ -283,6 +412,7 @@ async fn create_order(
     State(state): State<Arc<AppState>>,
     Form(form): Form<CreateOrderForm>,
 ) -> Response {
+    // 余票检查和扣减
     let mut trains = state.trains.write().unwrap();
     let train = trains.iter_mut().find(|t| t.id == form.train_id);
     let train = match train {
@@ -291,15 +421,22 @@ async fn create_order(
     };
 
     if let Some((fi, ti)) = find_interval(train, &form.from, &form.to) {
+        // 检查每个区间余票是否足够
         for i in fi..ti {
             if train.seats[i] < form.seat_count {
                 return (StatusCode::BAD_REQUEST, "区间余票不足").into_response();
             }
         }
+        // 扣减区间余票
         for i in fi..ti {
             train.seats[i] -= form.seat_count;
         }
-        train.available_seats = train.seats.iter().min().cloned().unwrap_or(0);
+        // 更新已售计数
+        let mut sold_counts = state.sold_counts.write().unwrap();
+        for i in fi..ti {
+            let key = (form.train_id.clone(), i);
+            *sold_counts.entry(key).or_insert(0) += form.seat_count;
+        }
     } else {
         return (StatusCode::BAD_REQUEST, "无效的站点区间").into_response();
     }
@@ -322,7 +459,6 @@ async fn create_order(
     let mut orders = state.orders.write().unwrap();
     orders.insert(order_id.clone(), order);
 
-    // 渲染成功页
     let mut ctx = Context::new();
     ctx.insert("page_title", "占座成功 - 至冬国铁路");
     ctx.insert("order_id", &order_id);
@@ -347,7 +483,6 @@ async fn payment_page(
     }
 }
 
-// 支付完成
 async fn pay_order(State(state): State<Arc<AppState>>, Path(order_id): Path<String>) -> Response {
     let mut orders = state.orders.write().unwrap();
     if let Some(order) = orders.get_mut(&order_id) {
@@ -358,7 +493,6 @@ async fn pay_order(State(state): State<Arc<AppState>>, Path(order_id): Path<Stri
     }
 }
 
-// 直接通过 ?order_id=xxx 查询
 async fn orders_query(
     State(state): State<Arc<AppState>>,
     Query(params): Query<HashMap<String, String>>,
@@ -370,8 +504,6 @@ async fn orders_query(
         ctx.insert("page_title", "订单查询结果 - 至冬国铁路");
         if let Some(order) = order {
             ctx.insert("order", &order);
-        } else {
-            todo!();
         }
         let html = state.tera.render("order_result.html", &ctx).unwrap();
         Html(html).into_response()
@@ -383,10 +515,26 @@ async fn orders_query(
     }
 }
 
-// ---------- 启动服务 ----------
+// ---------- 通知页面 ----------
+async fn notifications_page(State(state): State<Arc<AppState>>) -> Response {
+    let notifs = state.notifications.read().unwrap();
+    let mut ctx = Context::new();
+    ctx.insert("page_title", "通知 - 至冬国铁路");
+    ctx.insert("notifications", &*notifs);
+    let html = state.tera.render("notifications.html", &ctx).unwrap();
+    Html(html).into_response()
+}
+
+// ---------- 手动重载端点 ----------
+async fn admin_reload(State(state): State<Arc<AppState>>) -> Response {
+    reload_all(&state);
+    (StatusCode::OK, "重载成功").into_response()
+}
+
+// ---------- 主函数 ----------
 #[tokio::main]
 async fn main() {
-    // 直接在 new 时传入模板路径的 glob 模式
+    // 初始化 Tera
     let tera = match Tera::new("templates/**/*.html") {
         Ok(t) => t,
         Err(e) => {
@@ -395,27 +543,60 @@ async fn main() {
         }
     };
 
-    let trains = load_trains_from_csv("trains.csv");
+    // 初始加载数据
+    let sold_counts = HashMap::new();
+    let trains = load_trains_from_csv("trains.csv", &sold_counts);
+    let notifications = load_notifications("notifications.txt");
 
     let state = Arc::new(AppState {
         tera,
         trains: RwLock::new(trains),
         orders: RwLock::new(HashMap::new()),
+        sold_counts: RwLock::new(sold_counts),
+        notifications: RwLock::new(notifications),
+        train_mtime: RwLock::new(get_mtime("trains.csv")),
+        notif_mtime: RwLock::new(get_mtime("notifications.txt")),
     });
 
-    // 构建路由
+    // 启动热重载后台任务（每30秒检查一次文件变更）
+    let state_clone = state.clone();
+    tokio::spawn(async move {
+        let mut interval = time::interval(StdDuration::from_secs(30));
+        loop {
+            interval.tick().await;
+            // 检查文件修改时间
+            let train_mtime = get_mtime("trains.csv");
+            let notif_mtime = get_mtime("notifications.txt");
+            let mut need_reload = false;
+            {
+                let t_mtime = state_clone.train_mtime.read().unwrap();
+                let n_mtime = state_clone.notif_mtime.read().unwrap();
+                if train_mtime > *t_mtime || notif_mtime > *n_mtime {
+                    need_reload = true;
+                }
+            }
+            if need_reload {
+                println!("检测到文件变更，执行热重载...");
+                reload_all(&state_clone);
+            }
+        }
+    });
+
+    // 路由配置
     let app = Router::new()
         .route("/", get(index))
         .route("/search", get(search))
-        .route("/order/create", post(create_order)) // 路径优先
+        .route("/order/create", post(create_order))
         .route("/order/{train_id}", get(order_form))
-        .route("/orders", get(orders_query)) // 显示表单，若带参数则直接查询
-        .route("/payment/{order_id}/pay", get(pay_order)) // 路径优先
+        .route("/orders", get(orders_query))
+        .route("/payment/{order_id}/pay", get(pay_order))
         .route("/payment/{order_id}", get(payment_page))
+        .route("/notifications", get(notifications_page))
+        .route("/admin/reload", get(admin_reload))
         .nest_service("/static", ServeDir::new("static"))
         .with_state(state);
 
     let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await.unwrap();
-    println!("至冬国铁路模拟购票系统已启动：http://localhost:3000");
+    println!("至冬国铁路已启动：http://localhost:3000");
     axum::serve(listener, app).await.unwrap();
 }

@@ -1,0 +1,17 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="notifications-container">
+  <h2><i class="fas fa-bullhorn"></i> 通知公告</h2>
+  {% if notifications %}
+  {% for notif in notifications %}
+  <div class="notification-item">
+    <h3>{{ notif.title }}</h3>
+    <p>{{ notif.content }}</p>
+  </div>
+  {% endfor %}
+  {% else %}
+  <p>暂无通知。</p>
+  {% endif %}
+</div>
+{% endblock %}
