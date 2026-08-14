@@ -1,0 +1,21 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="tickets-container">
+  <h2><i class="fas fa-ticket-alt"></i> 车票打印</h2>
+  <p>订单号：{{ order_id }}</p>
+  <div class="ticket-grid">
+    {% for seat in seat_numbers %}
+    <div class="ticket-item">
+      <img src="/ticket/{{ order_id }}/{{ loop.index0 }}" alt="车票 {{ loop.index0 + 1 }}"
+        style="max-width:400px; border:1px solid #ccc; border-radius:8px;">
+      <p>座位号：{{ seat }}</p>
+    </div>
+    {% endfor %}
+  </div>
+  <div class="print-actions">
+    <button onclick="window.print()" class="btn-primary"><i class="fas fa-print"></i> 打印全部</button>
+    <a href="/" class="btn-secondary">返回首页</a>
+  </div>
+</div>
+{% endblock %}

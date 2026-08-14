@@ -29,6 +29,7 @@
     </div>
     {% elif order.status == 'Paid' %}
     <p><i class="fas fa-check-circle" style="color: #4dc3ff;"></i> 支付已完成，感谢您的乘坐！</p>
+    <a href="/tickets/{{ order.id }}" class="btn-primary"><i class="fas fa-print"></i> 打印车票</a>
     {% else %}
     <p><i class="fas fa-times-circle" style="color: #ff6b6b;"></i> 该订单已取消。</p>
     {% endif %}
