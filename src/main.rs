@@ -6,26 +6,26 @@ use axum::{
     routing::{get, post},
 };
 use chrono::{Duration, Local, Utc};
-use csv::ReaderBuilder; // 用于读取 CSV
+use csv::ReaderBuilder;
 use serde::{Deserialize, Serialize};
 use serde_json;
 use std::collections::HashMap;
 use std::collections::HashSet;
-use std::fs::File; // 文件操作
+use std::fs::File;
 use std::sync::{Arc, RwLock};
 use tera::{Context, Tera};
 use tower_http::services::ServeDir;
-use uuid::Uuid; // 用于去重站点
+use uuid::Uuid;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct Train {
     id: String,
     model: String,
     formation: String,
-    stations: Vec<String>, // 站点列表
-    times: Vec<String>,    // 时间列表
-    prices: Vec<u32>,      // 区间票价（长度 = stations.len()-1）
-    seats: Vec<u32>,       // 区间余票（长度 = stations.len()-1）
+    stations: Vec<String>,
+    times: Vec<String>,
+    prices: Vec<u32>,
+    seats: Vec<u32>,
     available_seats: u32,
 }
 
@@ -44,7 +44,7 @@ struct Order {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 enum OrderStatus {
-    Pending, // 占座中
+    Pending, // 占座
     Paid,
     Cancelled,
 }
@@ -53,7 +53,7 @@ enum OrderStatus {
 struct AppState {
     tera: Tera,
     trains: RwLock<Vec<Train>>,
-    orders: RwLock<HashMap<String, Order>>, // order_id -> Order
+    orders: RwLock<HashMap<String, Order>>,
 }
 
 // ---------- 查询参数 ----------
@@ -61,7 +61,7 @@ struct AppState {
 struct SearchParams {
     from: String,
     to: String,
-    date: Option<String>, // 忽略日期，仅用于演示
+    date: Option<String>,
 }
 
 // ---------- 下单表单 ----------
@@ -86,7 +86,7 @@ fn load_trains_from_csv(path: &str) -> Vec<Train> {
         let model = record[1].to_string();
         let formation = record[2].to_string();
 
-        // 解析列表字段，按 '-' 分割
+        // 解析列表字段
         let stations: Vec<String> = record[3].split('-').map(|s| s.to_string()).collect();
         let times: Vec<String> = record[4].split('-').map(|s| s.to_string()).collect();
         let prices: Vec<u32> = record[5]
@@ -99,7 +99,6 @@ fn load_trains_from_csv(path: &str) -> Vec<Train> {
             .collect();
         let available_seats = seats.iter().min().cloned().unwrap_or(0);
 
-        // 数据完整性校验（可选）
         assert_eq!(stations.len(), times.len(), "站点与时间数量不一致");
         assert_eq!(stations.len() - 1, prices.len(), "票价数量不匹配");
         assert_eq!(stations.len() - 1, seats.len(), "余票数量不匹配");
@@ -172,7 +171,7 @@ async fn index(State(state): State<Arc<AppState>>) -> Response {
             let min_seats = t.seats.iter().min().cloned().unwrap_or(0);
             serde_json::json!({
                 "id": t.id,
-                "model": t.model,          // 新增
+                "model": t.model,
                 "from": first,
                 "to": last,
                 "departure": dep,
@@ -220,7 +219,7 @@ async fn search(
         }
     }
 
-    // 模板渲染部分保持不变
+    // 模板渲染部分
     let mut ctx = Context::new();
     ctx.insert("page_title", "搜索结果 - 至冬国铁路");
     ctx.insert("results", &results);
@@ -292,23 +291,20 @@ async fn create_order(
     };
 
     if let Some((fi, ti)) = find_interval(train, &form.from, &form.to) {
-        // 检查每个区间余票是否足够
         for i in fi..ti {
             if train.seats[i] < form.seat_count {
                 return (StatusCode::BAD_REQUEST, "区间余票不足").into_response();
             }
         }
-        // 扣减所有区间余票
         for i in fi..ti {
             train.seats[i] -= form.seat_count;
         }
-        // 更新全局余票（最小值）
         train.available_seats = train.seats.iter().min().cloned().unwrap_or(0);
     } else {
         return (StatusCode::BAD_REQUEST, "无效的站点区间").into_response();
     }
 
-    // 生成订单（不变）
+    // 生成订单
     let order_id = Uuid::new_v4().to_string();
     let expire_at = Utc::now() + Duration::minutes(30);
     let order = Order {
@@ -326,7 +322,7 @@ async fn create_order(
     let mut orders = state.orders.write().unwrap();
     orders.insert(order_id.clone(), order);
 
-    // 渲染成功页（不变）
+    // 渲染成功页
     let mut ctx = Context::new();
     ctx.insert("page_title", "占座成功 - 至冬国铁路");
     ctx.insert("order_id", &order_id);
@@ -351,7 +347,7 @@ async fn payment_page(
     }
 }
 
-// 模拟支付完成（简单重定向）
+// 支付完成
 async fn pay_order(State(state): State<Arc<AppState>>, Path(order_id): Path<String>) -> Response {
     let mut orders = state.orders.write().unwrap();
     if let Some(order) = orders.get_mut(&order_id) {
@@ -362,12 +358,11 @@ async fn pay_order(State(state): State<Arc<AppState>>, Path(order_id): Path<Stri
     }
 }
 
-// 订单查询（支持直接通过 ?order_id=xxx 查询）
+// 直接通过 ?order_id=xxx 查询
 async fn orders_query(
     State(state): State<Arc<AppState>>,
     Query(params): Query<HashMap<String, String>>,
 ) -> Response {
-    // 如果传入了 order_id，则尝试查询并显示结果
     if let Some(order_id) = params.get("order_id") {
         let orders = state.orders.read().unwrap();
         let order = orders.get(order_id).cloned();
@@ -376,14 +371,12 @@ async fn orders_query(
         if let Some(order) = order {
             ctx.insert("order", &order);
         } else {
-            // 未找到，仍渲染 result 模板，但 order 为 None（模板中判断）
-            // 注意：模板中需要处理 order 为空的情况，我们传一个空值或不传
+            todo!();
         }
         let html = state.tera.render("order_result.html", &ctx).unwrap();
         Html(html).into_response()
     } else {
         let mut ctx = Context::new();
-        // 插入 page_title（关键！）
         ctx.insert("page_title", "订单查询 - 至冬国铁路");
         let html = state.tera.render("order_query.html", &ctx).unwrap();
         Html(html).into_response()
@@ -414,15 +407,15 @@ async fn main() {
     let app = Router::new()
         .route("/", get(index))
         .route("/search", get(search))
-        .route("/order/create", post(create_order)) // 具体路径优先
+        .route("/order/create", post(create_order)) // 路径优先
         .route("/order/{train_id}", get(order_form))
         .route("/orders", get(orders_query)) // 显示表单，若带参数则直接查询
-        .route("/payment/{order_id}/pay", get(pay_order)) // 更具体的路径优先
+        .route("/payment/{order_id}/pay", get(pay_order)) // 路径优先
         .route("/payment/{order_id}", get(payment_page))
         .nest_service("/static", ServeDir::new("static"))
         .with_state(state);
 
     let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await.unwrap();
-    println!("至冬国铁路已启动：http://localhost:3000");
+    println!("至冬国铁路模拟购票系统已启动：http://localhost:3000");
     axum::serve(listener, app).await.unwrap();
 }
