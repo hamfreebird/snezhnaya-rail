@@ -35,10 +35,15 @@
 
 <div class="train-list">
   <h2><i class="fas fa-train"></i> 全部车次</h2>
+  <div class="notice-tip">
+    <i class="fas fa-info-circle"></i> 
+    部分车次显示“停止售票”可能是由于运行日不匹配或已过发车时间，不代表未来不开放售票，请选择其他日期查询。
+  </div>
   <table>
     <thead>
       <tr>
         <th>车次</th>
+        <th>运行日</th>
         <th>列车型号</th>
         <th>出发站</th>
         <th>到达站</th>
@@ -52,15 +57,24 @@
       {% for train in display_trains %}
       <tr
         class="{% if not train.is_selling and not train.is_departed %}stopped{% elif train.is_departed %}departed{% endif %}">
-        <td><span class="train-id">❄️ {{ train.id }}</span></td>
+        <td><span class="train-id">❄️ {{ train.base_train_id }}</span></td>
+        <td>{% if train.run_day == 1 %}周一{% elif train.run_day == 2 %}周二{% elif train.run_day == 3 %}周三
+          {% elif train.run_day == 4 %}周四{% elif train.run_day == 5 %}周五{% elif train.run_day == 6 %}周六{% else %}周日{% endif %}</td>
         <td>{{ train.model }}</td>
         <td>{{ train.from }}</td>
         <td>{{ train.to }}</td>
         <td>{{ train.departure }}</td>
         <td>{{ train.arrival }}</td>
-        <td>{{ train.seats }}</td>
         <td>
-          {% if train.is_selling %}
+          {% if not train.is_selling or train.seats == 0 %}
+            无票
+          {% else %}
+            {{ train.seats }}
+          {% endif %}
+        </td>
+        <td>
+          <a href="/detail/{{ train.id }}?from={{ train.from }}&to={{ train.to }}" class="btn-detail">详情  </a>
+          {% if train.is_selling and train.seats > 0 %}
           <a href="/order/{{ train.id }}?from={{ train.from }}&to={{ train.to }}&date={{ selected_date }}" class="btn-booking">预订</a>
           {% elif train.is_departed %}
           <span class="departed-text">已发车</span>

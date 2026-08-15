@@ -53,16 +53,23 @@
     <tbody>
       {% for item in results %}
       <tr class="{% if not item.is_selling and not item.is_departed %}stopped{% elif item.is_departed %}departed{% endif %}">
-        <td><span class="train-id">❄️ {{ item.id }}</span></td>
+        <td><span class="train-id">❄️ {{ item.base_train_id }}</span></td>
         <td>{{ item.model }}</td>
         <td>{{ item.from }}</td>
         <td>{{ item.to }}</td>
         <td>{{ item.departure }}</td>
         <td>{{ item.arrival }}</td>
         <td>{{ item.price }}</td>
-        <td>{{ item.seats }}</td>
         <td>
-          {% if item.is_selling %}
+          {% if not item.is_selling or item.seats == 0 %}
+            无票
+          {% else %}
+            {{ item.seats }}
+          {% endif %}
+        </td>
+        <td>
+          <a href="/detail/{{ item.id }}?from={{ item.from }}&to={{ item.to }}" class="btn-detail">详情  </a>
+          {% if item.is_selling and item.seats > 0 %}
           <a href="/order/{{ item.id }}?from={{ item.from }}&to={{ item.to }}&date={{ selected_date }}" class="btn-booking">预订</a>
           {% elif item.is_departed %}
           <span class="departed-text">已发车</span>

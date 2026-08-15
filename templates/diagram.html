@@ -1,0 +1,26 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="diagram-container">
+  <h2><i class="fas fa-map"></i> 列车运行图</h2>
+  <p class="diagram-subtitle">火车配线图与列车运行图</p>
+
+  <div class="diagram-section">
+    <h3>火车配线图</h3>
+    <div class="diagram-image" style="background-image: url('/static/images/未标题-2.png');">
+    </div>
+  </div>
+
+  <div class="diagram-section">
+    <h3>列车运行图</h3>
+    <div class="diagram-image" style="background-image: url('/static/images/background.jpg');">
+      <div class="diagram-placeholder">
+        <i class="fas fa-train"></i>
+        <p>列车运行图 (待绘制)</p>
+      </div>
+    </div>
+  </div>
+
+  <p>火车配线图来自B站up主@Genshigros</p>
+</div>
+{% endblock %}

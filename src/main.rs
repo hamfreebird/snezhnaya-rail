@@ -7,7 +7,7 @@ use axum::{
     routing::{get, post},
 };
 use rand::Rng;
-use chrono::{Duration, Local, NaiveDate, NaiveTime, Utc};
+use chrono::{Duration, Local, NaiveDate, NaiveTime, Utc, Datelike};
 use csv::ReaderBuilder;
 use image::{ImageFormat, Rgb, RgbImage};
 use imageproc::drawing::draw_text_mut;
@@ -26,25 +26,44 @@ use uuid::Uuid;
 // ---------- 数据结构 ----------
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct Train {
+    // 唯一ID：格式为 "车次-运行日"，如 "1001-3"
     id: String,
+    // 原始车次号（显示用）
+    base_train_id: String,
+    // 列车名称
+    name: String,
     model: String,
     formation: String,
+    // 站点列表（顺序）
     stations: Vec<String>,
-    times: Vec<String>,
+    // 站台列表（与站点一一对应）
+    platforms: Vec<String>,
+    // 到达时间列表（首站为None）
+    arrival_times: Vec<Option<String>>,
+    // 出发时间列表（终点站为None）
+    departure_times: Vec<Option<String>>,
+    // 区间票价（长度 = stations.len()-1）
     prices: Vec<u32>,
+    // 权重
     weights: Vec<u32>,
+    // 总座位数
     total_seats: u32,
+    // 实时余票
     seats: Vec<u32>,
+    // 状态
     is_departed: bool,
     is_selling: bool,
+    // 运行日（该实例对应的星期几，1=周一）
+    run_day: u8,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct Order {
     id: String,
-    train_id: String,
+    train_id: String,          // 指向 Train.id（唯一ID）
     from_station: String,
     to_station: String,
+    from_platform: String,     // 新增：出发站台
     passenger_name: String,
     seat_count: u32,
     price: u32,
@@ -91,6 +110,7 @@ struct SearchParams {
 struct CreateOrderForm {
     train_id: String,
     from: String,
+    from_platform: String,
     to: String,
     total_price: u32,
     passenger_name: String,
@@ -174,19 +194,19 @@ fn compute_interval_seats_with_date(
     let now = Local::now().naive_local();
     let days_diff = (*base_date - now.date()).num_days();
 
-    let base_factor = if days_diff < 0 {
+    // 获取首站出发时间（从 departure_times 第一个非None）
+    let first_dep_str = train.departure_times.first().and_then(|o| o.as_deref()).unwrap_or("00:00");
+    let factor = if days_diff < 0 {
         0.0
     } else if days_diff == 0 {
         let mut factor = 0.15;
-        if let Some(first_time_str) = train.times.first() {
-            if let Ok(first_time) = NaiveTime::parse_from_str(first_time_str, "%H:%M") {
-                let dep_datetime = base_date.and_time(first_time);
-                let mins_left = (dep_datetime - now).num_minutes();
-                if mins_left <= 0 {
-                    factor = 0.0;
-                } else if mins_left < 120 {
-                    factor = 0.15 * (mins_left as f64 / 120.0);
-                }
+        if let Ok(first_time) = NaiveTime::parse_from_str(first_dep_str, "%H:%M") {
+            let dep_datetime = base_date.and_time(first_time);
+            let mins_left = (dep_datetime - now).num_minutes();
+            if mins_left <= 0 {
+                factor = 0.0;
+            } else if mins_left < 120 {
+                factor = 0.15 * (mins_left as f64 / 120.0);
             }
         }
         factor
@@ -205,7 +225,7 @@ fn compute_interval_seats_with_date(
     for (i, &alloc) in allocated.iter().enumerate() {
         let key = (train.id.clone(), i);
         let sold = sold_counts.get(&key).cloned().unwrap_or(0);
-        let max_avail = (alloc as f64 * base_factor) as u32;
+        let max_avail = (alloc as f64 * factor) as u32;
         let avail = if max_avail >= sold {
             max_avail - sold
         } else {
@@ -231,8 +251,20 @@ fn update_train_status_with_date(train: &mut Train, base_date: &NaiveDate) {
         train.is_departed = false;
         return;
     }
+
+    // 检查运行日是否匹配（由于我们按日拆分实例，train.run_day 应等于 base_date 的星期）
+    // 但 base_date 可能不是今天，我们用 base_date 的星期与 train.run_day 比较
+    let base_weekday = base_date.weekday().number_from_monday() as u8; // 1=周一
+    if base_weekday != train.run_day {
+        // 如果不匹配，则该实例今天不可售（但显示时可能隐藏）
+        train.is_selling = false;
+        train.is_departed = false;
+        return;
+    }
+
     if days_diff == 0 {
-        if let Some(first_time_str) = train.times.first() {
+        // 使用 departure_times 的第一个非None
+        if let Some(Some(first_time_str)) = train.departure_times.first() {
             if let Ok(first_time) = NaiveTime::parse_from_str(first_time_str, "%H:%M") {
                 if now.time() >= first_time {
                     train.is_departed = true;
@@ -254,11 +286,12 @@ fn update_train_status_with_date(train: &mut Train, base_date: &NaiveDate) {
         train.is_departed = false;
         return;
     }
+
+    // 未来1~7天且运行日匹配
     train.is_selling = true;
     train.is_departed = false;
 }
 
-// 加载静态数据
 fn load_trains_static(path: &str) -> Vec<Train> {
     let file = File::open(path).expect("无法打开 trains.csv 文件");
     let mut rdr = ReaderBuilder::new().has_headers(true).from_reader(file);
@@ -266,34 +299,76 @@ fn load_trains_static(path: &str) -> Vec<Train> {
 
     for result in rdr.records() {
         let record = result.expect("CSV 记录解析失败");
-        let id = record[0].to_string();
+        let base_id = record[0].to_string();
         let model = record[1].to_string();
         let formation = record[2].to_string();
         let stations: Vec<String> = record[3].split('-').map(|s| s.to_string()).collect();
         let times: Vec<String> = record[4].split('-').map(|s| s.to_string()).collect();
-        let prices: Vec<u32> = record[5]
-            .split('-')
-            .map(|s| s.parse().unwrap_or(0))
-            .collect();
-        let weights: Vec<u32> = record[6]
-            .split('-')
-            .map(|s| s.parse().unwrap_or(0))
-            .collect();
+        let prices: Vec<u32> = record[5].split('-').map(|s| s.parse().unwrap_or(0)).collect();
+        let weights: Vec<u32> = record[6].split('-').map(|s| s.parse().unwrap_or(0)).collect();
         let total_seats: u32 = record[7].parse().unwrap_or(0);
 
-        trains.push(Train {
-            id,
-            model,
-            formation,
-            stations,
-            times,
-            prices,
-            weights,
-            total_seats,
-            seats: vec![],
-            is_departed: false,
-            is_selling: false,
-        });
+        // 新增列
+        let run_days_str = record[8].to_string();
+        let platforms: Vec<String> = record[9].split('-').map(|s| s.to_string()).collect();
+        let stop_mins: Vec<u32> = record[10].split('-').map(|s| s.parse().unwrap_or(0)).collect();
+        let name = record[11].to_string();
+
+        // 解析运行日
+        let run_days: Vec<u8> = run_days_str
+            .split('-')
+            .filter_map(|s| s.trim().parse().ok())
+            .collect();
+
+        // 为每个运行日生成一个实例
+        for &day in &run_days {
+            let id = format!("{}-{}", base_id, day);
+
+            // 计算到达和出发时间
+            let mut arrival_times = Vec::new();
+            let mut departure_times = Vec::new();
+            for i in 0..stations.len() {
+                if i == 0 {
+                    // 首站：只有出发时间
+                    arrival_times.push(None);
+                    departure_times.push(Some(times[i].clone()));
+                } else if i == stations.len() - 1 {
+                    // 终点站：只有到达时间
+                    arrival_times.push(Some(times[i].clone()));
+                    departure_times.push(None);
+                } else {
+                    // 中间站：到达时间为 times[i]，出发时间 = times[i] + stop_mins[i]
+                    arrival_times.push(Some(times[i].clone()));
+                    let dep_time = if let Ok(t) = NaiveTime::parse_from_str(&times[i], "%H:%M") {
+                        let stop = stop_mins.get(i).cloned().unwrap_or(0);
+                        let dep = t + chrono::Duration::minutes(stop as i64);
+                        Some(dep.format("%H:%M").to_string())
+                    } else {
+                        Some(times[i].clone()) // fallback
+                    };
+                    departure_times.push(dep_time);
+                }
+            }
+
+            trains.push(Train {
+                id,
+                base_train_id: base_id.clone(),
+                name: name.clone(),
+                model: model.clone(),
+                formation: formation.clone(),
+                stations: stations.clone(),
+                platforms: platforms.clone(),
+                arrival_times,
+                departure_times,
+                prices: prices.clone(),
+                weights: weights.clone(),
+                total_seats,
+                seats: vec![], // 稍后计算
+                is_departed: false,
+                is_selling: false,
+                run_day: day,
+            });
+        }
     }
     trains
 }
@@ -445,12 +520,29 @@ fn generate_ticket_image(order: &Order, seat_number: &str, _train: &Train) -> Ve
         &font,
         &format!("{}  {}→{}", order.train_id, order.from_station, order.to_station),
     );
-    draw_text_mut(&mut img, dark_blue, 10, 60, scale, &font, &format!("座号: {}", seat_number));
+    draw_text_mut(
+        &mut img, 
+        dark_blue, 
+        10, 
+        55, 
+        scale, 
+        &font, 
+        &format!("站台: {}", order.from_platform)
+    );
+    draw_text_mut(
+        &mut img, 
+        dark_blue, 
+        10, 
+        75, 
+        scale, 
+        &font, 
+        &format!("座号: {}", seat_number)
+    );
     draw_text_mut(
         &mut img,
         dark_blue,
         10,
-        85,
+        95,
         scale,
         &font,
         &format!("票价: {} 摩拉", order.price / order.seat_count),
@@ -459,7 +551,7 @@ fn generate_ticket_image(order: &Order, seat_number: &str, _train: &Train) -> Ve
         &mut img,
         dark_blue,
         10,
-        110,
+        115,
         scale,
         &font,
         &format!("订单号: {}", &order.id[..8]),
@@ -508,11 +600,12 @@ async fn index(State(state): State<Arc<AppState>>) -> Response {
         .map(|t| {
             let first = t.stations.first().unwrap();
             let last = t.stations.last().unwrap();
-            let dep = t.times.first().unwrap();
-            let arr = t.times.last().unwrap();
+            let dep = t.departure_times.first().and_then(|o| o.as_ref());
+            let arr = t.arrival_times.last().and_then(|o| o.as_ref());
             let min_seats = t.seats.iter().min().cloned().unwrap_or(0);
             serde_json::json!({
                 "id": t.id,
+                "base_train_id": t.base_train_id,
                 "model": t.model,
                 "from": first,
                 "to": last,
@@ -521,6 +614,7 @@ async fn index(State(state): State<Arc<AppState>>) -> Response {
                 "seats": min_seats,
                 "is_selling": t.is_selling,
                 "is_departed": t.is_departed,
+                "run_day": t.run_day,
             })
         })
         .collect();
@@ -574,10 +668,11 @@ async fn search(
         if let Some((fi, ti)) = find_interval(train, from, to) {
             let total_price: u32 = train.prices[fi..ti].iter().sum();
             let min_seats = train.seats[fi..ti].iter().min().cloned().unwrap_or(0);
-            let departure = &train.times[fi];
-            let arrival = &train.times[ti];
+            let departure = &train.departure_times[fi].as_ref();
+            let arrival = &train.arrival_times[ti].as_ref();
             results.push(serde_json::json!({
                 "id": train.id,
+                "base_train_id": train.base_train_id,
                 "model": train.model,
                 "from": from,
                 "to": to,
@@ -658,11 +753,13 @@ async fn order_form(
             return (StatusCode::BAD_REQUEST, "该车次已停止售票或已发车").into_response();
         }
         if let Some((fi, ti)) = find_interval(&train, &from, &to) {
-            let departure = &train.times[fi];
-            let arrival = &train.times[ti];
+            let departure = &train.departure_times[fi].as_ref();
+            let arrival = &train.arrival_times[ti].as_ref();
             let total_price: u32 = train.prices[fi..ti].iter().sum();
             let min_seats = train.seats[fi..ti].iter().min().cloned().unwrap_or(0);
             let mut ctx = Context::new();
+            let from_platform = &train.platforms[fi];
+            ctx.insert("from_platform", from_platform);
             ctx.insert("page_title", "填写乘客信息 - 至冬国铁路");
             ctx.insert("train", &train);
             ctx.insert("from", &from);
@@ -724,6 +821,7 @@ async fn create_order(
         train_id: form.train_id,
         from_station: form.from,
         to_station: form.to,
+        from_platform: form.from_platform,
         passenger_name: form.passenger_name,
         seat_count: form.seat_count,
         price: form.total_price * form.seat_count,
@@ -753,9 +851,15 @@ async fn payment_page(
         if order.status != OrderStatus::Pending {
             return (StatusCode::BAD_REQUEST, "订单状态异常").into_response();
         }
+        let trains = state.trains.read().unwrap();
+        let base_train_id = trains.iter()
+            .find(|t| t.id == order.train_id)
+            .map(|t| t.base_train_id.clone())
+            .unwrap_or_else(|| order.train_id.clone());
         let mut ctx = Context::new();
         ctx.insert("page_title", "支付 - 至冬国铁路");
         ctx.insert("order", order);
+        ctx.insert("base_train_id", &base_train_id);
         let html = state.tera.render("payment.html", &ctx).unwrap();
         Html(html).into_response()
     } else {
@@ -835,7 +939,7 @@ async fn exchange_query(
         let trains = state.trains.read().unwrap();
         let train = trains.iter().find(|t| t.id == order.train_id);
         let can_operate = if let Some(t) = train {
-            if let Some(first_time_str) = t.times.first() {
+            if let Some(first_time_str) = t.departure_times.first().and_then(|o| o.as_ref()) {
                 if let Ok(first_time) = NaiveTime::parse_from_str(first_time_str, "%H:%M") {
                     let base_date = now.date();
                     let dep_datetime = base_date.and_time(first_time);
@@ -879,7 +983,7 @@ async fn exchange_refund(
         let trains = state.trains.read().unwrap();
         let train = trains.iter().find(|t| t.id == order.train_id);
         if let Some(t) = train {
-            if let Some(first_time_str) = t.times.first() {
+            if let Some(first_time_str) = t.departure_times.first().and_then(|o| o.as_ref()) {
                 if let Ok(first_time) = NaiveTime::parse_from_str(first_time_str, "%H:%M") {
                     let base_date = now.date();
                     let dep_datetime = base_date.and_time(first_time);
@@ -958,7 +1062,7 @@ async fn exchange_change(
     };
 
     if let Some(train) = trains.iter().find(|t| t.id == order.train_id) {
-        if let Some(first_time_str) = train.times.first() {
+        if let Some(first_time_str) = train.departure_times.first().and_then(|o| o.as_ref()) {
             if let Ok(first_time) = NaiveTime::parse_from_str(first_time_str, "%H:%M") {
                 let now = Local::now().naive_local();
                 let base_date = now.date();
@@ -1050,6 +1154,8 @@ async fn tickets_page(
         if let Some(train) = train {
             let seat_numbers = generate_seat_numbers(train, order.seat_count);
             let mut ctx = Context::new();
+            let base_train_id = train.base_train_id.clone();
+            ctx.insert("base_train_id", &base_train_id);
             ctx.insert("page_title", "车票打印 - 至冬国铁路");
             ctx.insert("order_id", &order_id);
             ctx.insert("seat_numbers", &seat_numbers);
@@ -1089,6 +1195,50 @@ async fn ticket_image(
     } else {
         (StatusCode::NOT_FOUND, "订单不存在").into_response()
     }
+}
+
+// ---------- 车次细节 ----------
+async fn detail_page(
+    State(state): State<Arc<AppState>>,
+    Path(train_id): Path<String>,
+    Query(params): Query<HashMap<String, String>>,
+) -> Response {
+    let trains = state.trains.read().unwrap();
+    let train = trains.iter().find(|t| t.id == train_id).cloned();
+    if let Some(train) = train {
+        let from = params.get("from").cloned().unwrap_or_default();
+        let to = params.get("to").cloned().unwrap_or_default();
+
+        // 构造站点详情列表
+        let mut station_details = Vec::new();
+        for i in 0..train.stations.len() {
+            station_details.push(serde_json::json!({
+                "station": train.stations[i],
+                "platform": train.platforms.get(i).unwrap_or(&"".to_string()),
+                "arrival": train.arrival_times[i].as_ref().unwrap_or(&"始发".to_string()),
+                "departure": train.departure_times[i].as_ref().unwrap_or(&"终到".to_string()),
+            }));
+        }
+
+        let mut ctx = Context::new();
+        ctx.insert("page_title", &format!("{} 详情", train.name));
+        ctx.insert("train", &train);
+        ctx.insert("from_highlight", &from);
+        ctx.insert("to_highlight", &to);
+        ctx.insert("station_details", &station_details);
+        let html = state.tera.render("detail.html", &ctx).unwrap();
+        Html(html).into_response()
+    } else {
+        (StatusCode::NOT_FOUND, "车次不存在").into_response()
+    }
+}
+
+// ---------- 运行图 ----------
+async fn diagram_page(State(state): State<Arc<AppState>>) -> Response {
+    let mut ctx = Context::new();
+    ctx.insert("page_title", "列车运行图 - 至冬国铁路");
+    let html = state.tera.render("diagram.html", &ctx).unwrap();
+    Html(html).into_response()
 }
 
 // ---------- 管理端点 ----------
@@ -1158,6 +1308,7 @@ async fn main() {
         .route("/order/create", post(create_order))
         .route("/order/{train_id}", get(order_form))
         .route("/orders", get(orders_query))
+        .route("/detail/{train_id}", get(detail_page))
         .route("/payment/{order_id}/pay", get(pay_order))
         .route("/payment/{order_id}", get(payment_page))
         .route("/notifications", get(notifications_page))
@@ -1167,6 +1318,7 @@ async fn main() {
         .route("/exchange/change", post(exchange_change))
         .route("/tickets/{order_id}", get(tickets_page))
         .route("/ticket/{order_id}/{seat_index}", get(ticket_image))
+        .route("/diagram", get(diagram_page))
         .route("/admin/reload", get(admin_reload))
         .nest_service("/static", ServeDir::new("static"))
         .with_state(state);

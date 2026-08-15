@@ -9,10 +9,11 @@
     <div class="ticket-item">
       <img src="/ticket/{{ order_id }}/{{ loop.index0 }}" alt="车票 {{ loop.index0 + 1 }}"
         style="max-width:400px; border:1px solid #ccc; border-radius:8px;">
-      <p>座位号：{{ seat }}</p>
+      <p class="hint"> 请妥善保管您的车票，避免受损或遗失。</p>
     </div>
     {% endfor %}
   </div>
+  <td>   </td>
   <div class="print-actions">
     <button onclick="window.print()" class="btn-primary"><i class="fas fa-print"></i> 打印全部</button>
     <a href="/" class="btn-secondary">返回首页</a>

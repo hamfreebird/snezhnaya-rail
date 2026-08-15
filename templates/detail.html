@@ -1,0 +1,47 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="detail-container">
+  <div class="detail-header">
+    <h2><i class="fas fa-train"></i> {{ train.name }} ({{ train.base_train_id }})</h2>
+    <p class="train-meta">
+      <span><i class="fas fa-tag"></i> 型号: {{ train.model }}</span>
+      <span><i class="fas fa-layer-group"></i> 编组: {{ train.formation }}</span>
+      <span><i class="fas fa-calendar-week"></i> 运行日: {{ train.run_day }}</span>
+    </p>
+  </div>
+
+  <div class="detail-table-wrapper">
+    <table class="detail-table">
+      <thead>
+        <tr>
+          <th></th>
+          <th>站名</th>
+          <th>站台</th>
+          <th>到达</th>
+          <th>出发</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for detail in station_details %}
+        <tr class="{% if detail.station == from_highlight %}highlight-from{% endif %}
+                   {% if detail.station == to_highlight %}highlight-to{% endif %}">
+          <td class="route-arrow">
+              ↓
+          </td>
+          <td class="station-name">{{ detail.station }}</td>
+          <td class="station-platform">{{ detail.platform }}</td>
+          <td class="station-arrival">{{ detail.arrival }}</td>
+          <td class="station-departure">{{ detail.departure }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+
+  <td>   </td>
+  <div class="detail-actions">
+    <a href="javascript:history.back()" class="btn-secondary"><i class="fas fa-arrow-left"></i> 返回</a>
+  </div>
+</div>
+{% endblock %}

@@ -4,7 +4,7 @@
 <div class="order-form-container">
   <h2><i class="fas fa-edit"></i> 填写乘客信息</h2>
   <div class="train-summary">
-    <p><strong>车次：</strong>{{ train.id }} ({{ from }} → {{ to }})</p>
+    <p><strong>车次：</strong>{{ train.base_train_id }} ({{ from }} → {{ to }})</p>
     <p><strong>出发时间：</strong>{{ departure }} &nbsp;|&nbsp; <strong>到达时间：</strong>{{ arrival }}</p>
     <p><strong>票价：</strong>{{ total_price }} 摩拉 &nbsp;|&nbsp; <strong>余票：</strong>{{ min_seats }}</p>
   </div>
@@ -15,6 +15,7 @@
     <input type="hidden" name="to" value="{{ to }}">
     <input type="hidden" name="total_price" value="{{ total_price }}">
     <input type="hidden" name="date" value="{{ selected_date }}">
+    <input type="hidden" name="from_platform" value="{{ from_platform }}">
     <div class="field-group">
       <label for="passenger_name">乘客姓名</label>
       <input type="text" id="passenger_name" name="passenger_name" placeholder="请输入全名" required>
