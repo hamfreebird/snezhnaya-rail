@@ -4,13 +4,16 @@
 <div class="query-container">
   <h2><i class="fas fa-search"></i> 订单查询</h2>
   <p>请输入您的订单号，查询订单状态。</p>
-  <form action="/orders" method="get" class="search-form">
-    <div class="field-group">
+  <form action="/orders" method="get" class="search-form" style="display: flex; flex-wrap: wrap; gap: 10px; align-items: flex-end;">
+    <div class="field-group" style="flex: 3 1 300px;">
       <label for="order_id">订单号</label>
       <input type="text" id="order_id" name="order_id" placeholder="例如：5ffd17fa-a93c-4b5e-b74c-26a1d2a7e86a" required>
     </div>
-    <button type="submit" class="btn-primary"><i class="fas fa-search"></i> 查询</button>
+    <div style="display: flex; gap: 10px; flex-wrap: wrap; align-items: center;">
+      <button type="submit" class="btn-primary"><i class="fas fa-search"></i> 查询</button>
+      <a href="/my_orders" class="btn-detail">我的订单</a>    
+    </div>
   </form>
-  <p class="hint"><i class="fas fa-info-circle"></i> 订单号可在占座成功页或支付页找到，您也可以扫描您纸质车票上的二维码来获取订单号。</p>
+  <p class="hint"><i class="fas fa-info-circle"></i> 订单号可在占座成功页或支付页找到。</p>
 </div>
 {% endblock %}

@@ -6,20 +6,22 @@ use axum::{
     response::{Html, IntoResponse, Redirect, Response},
     routing::{get, post},
 };
-use rand::Rng;
-use chrono::{Duration, Local, NaiveDate, NaiveTime, Utc, Datelike};
+use chrono::{Datelike, Duration, Local, NaiveDate, NaiveTime, Utc};
 use csv::ReaderBuilder;
 use image::{ImageFormat, Rgb, RgbImage};
 use imageproc::drawing::draw_text_mut;
 use qrcode::QrCode;
+use rand::Rng;
 use serde::{Deserialize, Serialize};
 use serde_json;
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
+use std::net::SocketAddr;
 use std::sync::{Arc, RwLock};
 use std::time::{Duration as StdDuration, SystemTime};
 use tera::{Context, Tera};
 use tokio::time;
+use tower_governor::{GovernorLayer, governor::GovernorConfigBuilder};
 use tower_http::services::ServeDir;
 use uuid::Uuid;
 
@@ -60,10 +62,10 @@ struct Train {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct Order {
     id: String,
-    train_id: String,          // 指向 Train.id（唯一ID）
+    train_id: String, // 指向 Train.id（唯一ID）
     from_station: String,
     to_station: String,
-    from_platform: String,     // 新增：出发站台
+    from_platform: String, // 新增：出发站台
     passenger_name: String,
     seat_count: u32,
     price: u32,
@@ -97,6 +99,7 @@ struct AppState {
     notifications: RwLock<Vec<Notification>>,
     train_mtime: RwLock<SystemTime>,
     notif_mtime: RwLock<SystemTime>,
+    order_index: RwLock<HashMap<String, Vec<String>>>,
 }
 
 // ---------- 查询参数 ----------
@@ -143,6 +146,19 @@ fn find_interval(train: &Train, from: &str, to: &str) -> Option<(usize, usize)> 
         }
     }
     None
+}
+
+// fn load_order_index() -> HashMap<String, Vec<String>> {
+//     let path = "order_index.json";
+//     fs::read_to_string(path)
+//         .ok()
+//         .and_then(|data| serde_json::from_str(&data).ok())
+//         .unwrap_or_default()
+// }
+
+fn save_order_index(index: &HashMap<String, Vec<String>>) {
+    let data = serde_json::to_string_pretty(index).expect("序列化索引失败");
+    fs::write("order_index.json", data).expect("写入索引文件失败");
 }
 
 fn compute_interval_seats_with_date(
@@ -196,7 +212,11 @@ fn compute_interval_seats_with_date(
     let days_diff = (*base_date - now.date()).num_days();
 
     // 获取首站出发时间（从 departure_times 第一个非None）
-    let first_dep_str = train.departure_times.first().and_then(|o| o.as_deref()).unwrap_or("00:00");
+    let first_dep_str = train
+        .departure_times
+        .first()
+        .and_then(|o| o.as_deref())
+        .unwrap_or("00:00");
     let factor = if days_diff < 0 {
         0.0
     } else if days_diff == 0 {
@@ -305,14 +325,23 @@ fn load_trains_static(path: &str) -> Vec<Train> {
         let formation = record[2].to_string();
         let stations: Vec<String> = record[3].split('-').map(|s| s.to_string()).collect();
         let times: Vec<String> = record[4].split('-').map(|s| s.to_string()).collect();
-        let prices: Vec<u32> = record[5].split('-').map(|s| s.parse().unwrap_or(0)).collect();
-        let weights: Vec<u32> = record[6].split('-').map(|s| s.parse().unwrap_or(0)).collect();
+        let prices: Vec<u32> = record[5]
+            .split('-')
+            .map(|s| s.parse().unwrap_or(0))
+            .collect();
+        let weights: Vec<u32> = record[6]
+            .split('-')
+            .map(|s| s.parse().unwrap_or(0))
+            .collect();
         let total_seats: u32 = record[7].parse().unwrap_or(0);
 
         // 新增列
         let run_days_str = record[8].to_string();
         let platforms: Vec<String> = record[9].split('-').map(|s| s.to_string()).collect();
-        let stop_mins: Vec<u32> = record[10].split('-').map(|s| s.parse().unwrap_or(0)).collect();
+        let stop_mins: Vec<u32> = record[10]
+            .split('-')
+            .map(|s| s.parse().unwrap_or(0))
+            .collect();
         let name = record[11].to_string();
 
         // 解析运行日
@@ -353,16 +382,36 @@ fn load_trains_static(path: &str) -> Vec<Train> {
 
             // 校验数据一致性
             if stations.len() - 1 != prices.len() {
-                panic!("车次 {} 站点数 {} 票价数 {} 不匹配", base_id, stations.len(), prices.len());
+                panic!(
+                    "车次 {} 站点数 {} 票价数 {} 不匹配",
+                    base_id,
+                    stations.len(),
+                    prices.len()
+                );
             }
             if stations.len() - 1 != weights.len() {
-                panic!("车次 {} 站点数 {} 权重数 {} 不匹配", base_id, stations.len(), weights.len());
+                panic!(
+                    "车次 {} 站点数 {} 权重数 {} 不匹配",
+                    base_id,
+                    stations.len(),
+                    weights.len()
+                );
             }
             if stations.len() != platforms.len() {
-                panic!("车次 {} 站点数 {} 站台数 {} 不匹配", base_id, stations.len(), platforms.len());
+                panic!(
+                    "车次 {} 站点数 {} 站台数 {} 不匹配",
+                    base_id,
+                    stations.len(),
+                    platforms.len()
+                );
             }
             if stations.len() != stop_mins.len() {
-                panic!("车次 {} 站点数 {} 停靠时间数 {} 不匹配", base_id, stations.len(), stop_mins.len());
+                panic!(
+                    "车次 {} 站点数 {} 停靠时间数 {} 不匹配",
+                    base_id,
+                    stations.len(),
+                    stop_mins.len()
+                );
             }
 
             trains.push(Train {
@@ -469,14 +518,15 @@ fn load_font() -> FontArc {
         }
     }
     // 如果所有字体加载失败，给出明确错误并退出
-    panic!(
-        "未找到任何可用字体！当前搜索路径: {:?}",
-        font_paths
-    );
+    panic!("未找到任何可用字体！当前搜索路径: {:?}", font_paths);
 }
 
 fn generate_seat_numbers(train: &Train, count: u32) -> Vec<String> {
-    let seats_per_carriage = if train.model.contains("直特") { 35 } else { 40 };
+    let seats_per_carriage = if train.model.contains("直特") {
+        35
+    } else {
+        40
+    };
     let carriages = train
         .formation
         .chars()
@@ -486,7 +536,7 @@ fn generate_seat_numbers(train: &Train, count: u32) -> Vec<String> {
         .unwrap_or(1);
     let total_seats = carriages * seats_per_carriage;
     let count = count.min(total_seats);
-    let mut rng = rand::thread_rng();  // 使用完全限定名
+    let mut rng = rand::thread_rng(); // 使用完全限定名
     let start = if total_seats > count {
         rng.gen_range(0..=total_seats - count)
     } else {
@@ -508,7 +558,7 @@ fn generate_ticket_image(order: &Order, seat_number: &str, _train: &Train) -> Ve
     let mut img = RgbImage::new(width, height);
 
     // 1. 创建蓝白渐变背景（从上到下）
-    let top_color = Rgb([50, 90, 170]);   // 深蓝
+    let top_color = Rgb([50, 90, 170]); // 深蓝
     let bottom_color = Rgb([220, 235, 255]); // 淡蓝白
     for y in 0..height {
         let t = y as f32 / (height - 1) as f32;
@@ -533,25 +583,28 @@ fn generate_ticket_image(order: &Order, seat_number: &str, _train: &Train) -> Ve
         35,
         scale,
         &font,
-        &format!("{}  {}→{}", order.train_id, order.from_station, order.to_station),
+        &format!(
+            "{}  {}→{}",
+            order.train_id, order.from_station, order.to_station
+        ),
     );
     draw_text_mut(
-        &mut img, 
-        dark_blue, 
-        10, 
-        55, 
-        scale, 
-        &font, 
-        &format!("站台: {}", order.from_platform)
+        &mut img,
+        dark_blue,
+        10,
+        55,
+        scale,
+        &font,
+        &format!("站台: {}", order.from_platform),
     );
     draw_text_mut(
-        &mut img, 
-        dark_blue, 
-        10, 
-        75, 
-        scale, 
-        &font, 
-        &format!("座号: {}", seat_number)
+        &mut img,
+        dark_blue,
+        10,
+        75,
+        scale,
+        &font,
+        &format!("座号: {}", seat_number),
     );
     draw_text_mut(
         &mut img,
@@ -577,7 +630,8 @@ fn generate_ticket_image(order: &Order, seat_number: &str, _train: &Train) -> Ve
     // 3. 二维码（右下角，保持黑色）
     let qr = QrCode::new(order.id.as_bytes()).unwrap();
     let qr_image = qr.render::<image::Luma<u8>>().build();
-    let qr_resized = image::imageops::resize(&qr_image, 60, 60, image::imageops::FilterType::Nearest);
+    let qr_resized =
+        image::imageops::resize(&qr_image, 60, 60, image::imageops::FilterType::Nearest);
     let qr_rgb = image::DynamicImage::ImageLuma8(qr_resized).into_rgb8();
     image::imageops::overlay(&mut img, &qr_rgb, (width - 70) as i64, (height - 70) as i64);
 
@@ -868,7 +922,8 @@ async fn payment_page(
             return (StatusCode::BAD_REQUEST, "订单状态异常").into_response();
         }
         let trains = state.trains.read().unwrap();
-        let base_train_id = trains.iter()
+        let base_train_id = trains
+            .iter()
             .find(|t| t.id == order.train_id)
             .map(|t| t.base_train_id.clone())
             .unwrap_or_else(|| order.train_id.clone());
@@ -890,6 +945,16 @@ async fn pay_order(State(state): State<Arc<AppState>>, Path(order_id): Path<Stri
         if order.status == OrderStatus::Pending {
             order.status = OrderStatus::Paid;
             order.pay_time = Some(Utc::now().timestamp());
+            // ---- 记录订单索引 ----
+            let mut index = state.order_index.write().unwrap();
+            let name = order.passenger_name.clone();
+            index.entry(name).or_insert_with(Vec::new).push(order_id.clone());
+            // 写回文件（在锁外执行，但此处简单处理）
+            let index_clone = index.clone();
+            drop(index); // 释放锁
+            tokio::task::spawn_blocking(move || {
+                save_order_index(&index_clone);
+            });
             Redirect::to(&format!("/tickets/{}", order_id)).into_response()
         } else {
             (StatusCode::BAD_REQUEST, "订单已处理").into_response()
@@ -1012,6 +1077,20 @@ async fn exchange_refund(
 
         order.status = OrderStatus::Refunded;
 
+        // 从索引中删除
+        let mut index = state.order_index.write().unwrap();
+        if let Some(list) = index.get_mut(&order.passenger_name) {
+            list.retain(|id| id != &order_id);
+            if list.is_empty() {
+                index.remove(&order.passenger_name);
+            }
+        }
+        let index_clone = index.clone();
+        drop(index);
+        tokio::task::spawn_blocking(move || {
+            save_order_index(&index_clone);
+        });
+
         let mut sold_counts = state.sold_counts.write().unwrap();
         let train_id = order.train_id.clone();
         let from = &order.from_station;
@@ -1084,8 +1163,8 @@ async fn exchange_change(
         if let Some(first_time_str) = train.departure_times.first().and_then(|o| o.as_ref()) {
             if let Ok(first_time) = NaiveTime::parse_from_str(first_time_str, "%H:%M") {
                 let now = Local::now().naive_local();
-                let travel_date = NaiveDate::parse_from_str(&order.travel_date, "%Y-%m-%d")
-                    .unwrap_or(now.date());
+                let travel_date =
+                    NaiveDate::parse_from_str(&order.travel_date, "%Y-%m-%d").unwrap_or(now.date());
                 let dep_datetime = travel_date.and_time(first_time);
                 if now >= dep_datetime {
                     return (StatusCode::BAD_REQUEST, "已发车，不可改签").into_response();
@@ -1125,38 +1204,72 @@ async fn exchange_change(
         return (StatusCode::BAD_REQUEST, "新车次已停止售票或已发车").into_response();
     }
 
-    if let Some((fi, ti)) = find_interval(new_train, &new_from, &new_to) {
-        for i in fi..ti {
-            if new_train.seats[i] < new_seat_count {
-                return (StatusCode::BAD_REQUEST, "新车次余票不足").into_response();
+    // 在 if let 块内处理，并提取所需变量
+    let (new_price_total, from_platform, _interval_price) = {
+        if let Some((fi, ti)) = find_interval(new_train, &new_from, &new_to) {
+            // 检查余票
+            for i in fi..ti {
+                if new_train.seats[i] < new_seat_count {
+                    return (StatusCode::BAD_REQUEST, "新车次余票不足").into_response();
+                }
             }
+            // 扣减新车次余票
+            for i in fi..ti {
+                new_train.seats[i] -= new_seat_count;
+            }
+            // 更新 sold_counts
+            for i in fi..ti {
+                let key = (new_train_id.clone(), i);
+                *sold_counts.entry(key).or_insert(0) += new_seat_count;
+            }
+            // 计算区间总价
+            let interval_price: u32 = new_train.prices[fi..ti].iter().sum();
+            let new_total = interval_price * new_seat_count;
+            let final_price = if new_total > order.price { new_total } else { order.price };
+            let from_platform = new_train.platforms[fi].clone();
+            (final_price, from_platform, interval_price)
+        } else {
+            return (StatusCode::BAD_REQUEST, "新车次无效区间").into_response();
         }
-        // 扣减新车次余票
-        for i in fi..ti {
-            new_train.seats[i] -= new_seat_count;
-        }
-        // 更新 sold_counts
-        for i in fi..ti {
-            let key = (new_train_id.clone(), i);
-            *sold_counts.entry(key).or_insert(0) += new_seat_count;
-        }
-        // 计算新车次总价
-        let new_price: u32 = new_train.prices[fi..ti].iter().sum();
-        let final_price = new_price * new_seat_count;
+    };
 
-        // 4. 更新原订单
-        let order_mut = orders.get_mut(&order_id).unwrap();
-        order_mut.train_id = new_train_id.clone();
-        order_mut.from_station = new_from.clone();
-        order_mut.to_station = new_to.clone();
-        order_mut.seat_count = new_seat_count;
-        // 差价处理：若新车次价格低于原价，则保持原价不变（不退款）
-        if final_price > order_mut.price {
-            order_mut.price = final_price;
-        }
-    } else {
-        return (StatusCode::BAD_REQUEST, "新车次无效区间").into_response();
+    // 4. 创建新订单
+    let new_order_id = Uuid::new_v4().to_string();
+    let new_order = Order {
+        id: new_order_id.clone(),
+        train_id: new_train_id.clone(),
+        from_station: new_from.clone(),
+        to_station: new_to.clone(),
+        from_platform,
+        passenger_name: order.passenger_name.clone(),
+        seat_count: new_seat_count,
+        price: new_price_total,
+        status: OrderStatus::Paid,
+        expire_at: Utc::now().timestamp() + 1800, // 30分钟
+        created_at: Utc::now().timestamp(),
+        pay_time: Some(Utc::now().timestamp()),
+        travel_date: order.travel_date.clone(),
+    };
+
+    // 原订单标记为取消
+    let old_order = orders.get_mut(&order_id).unwrap();
+    old_order.status = OrderStatus::Cancelled;
+
+    // 插入新订单
+    orders.insert(new_order_id.clone(), new_order);
+
+    // 更新索引（删除原订单号，添加新订单号）
+    let mut index = state.order_index.write().unwrap();
+    let name = order.passenger_name.clone();
+    if let Some(list) = index.get_mut(&name) {
+        list.retain(|id| id != &order_id);
     }
+    index.entry(name).or_insert_with(Vec::new).push(new_order_id.clone());
+    let index_clone = index.clone();
+    drop(index);
+    tokio::task::spawn_blocking(move || {
+        save_order_index(&index_clone);
+    });
 
     // 5. 手动更新所有列车数据（避免死锁）
     for t in trains.iter_mut() {
@@ -1240,10 +1353,17 @@ async fn exchange_available(
 
     // 按出发时间排序
     available.sort_by(|a, b| {
-        a["departure"].as_str().unwrap().cmp(b["departure"].as_str().unwrap())
+        a["departure"]
+            .as_str()
+            .unwrap()
+            .cmp(b["departure"].as_str().unwrap())
     });
 
-    ([(header::CONTENT_TYPE, "application/json")], serde_json::to_string(&available).unwrap()).into_response()
+    (
+        [(header::CONTENT_TYPE, "application/json")],
+        serde_json::to_string(&available).unwrap(),
+    )
+        .into_response()
 }
 
 // ---------- 车票打印功能 ----------
@@ -1355,6 +1475,33 @@ async fn admin_reload(State(state): State<Arc<AppState>>) -> Response {
     (StatusCode::OK, "重载成功").into_response()
 }
 
+// 显示查询界面
+async fn my_orders_page(State(state): State<Arc<AppState>>) -> Response {
+    let mut ctx = Context::new();
+    ctx.insert("page_title", "我的订单 - 至冬国铁路");
+    ctx.insert("name", ""); // 添加空字符串默认值
+    let html = state.tera.render("my_orders.html", &ctx).unwrap();
+    Html(html).into_response()
+}
+
+// 查询处理
+async fn my_orders_query(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<HashMap<String, String>>,
+) -> Response {
+    let name = params.get("name").cloned().unwrap_or_default();
+    let mut ctx = Context::new();
+    ctx.insert("page_title", "我的订单 - 至冬国铁路");
+    if !name.is_empty() {
+        let index = state.order_index.read().unwrap();
+        let order_ids = index.get(&name).cloned().unwrap_or_default();
+        ctx.insert("orders", &order_ids);
+        ctx.insert("name", &name);
+    }
+    let html = state.tera.render("my_orders.html", &ctx).unwrap();
+    Html(html).into_response()
+}
+
 // ---------- 主函数 ----------
 #[tokio::main]
 async fn main() {
@@ -1377,6 +1524,9 @@ async fn main() {
     }
 
     let notifications = load_notifications("notifications.txt");
+    // 清空旧的订单索引文件，实现初始化时重置订单数据
+    let _ = fs::remove_file("order_index.json");
+    save_order_index(&HashMap::new()); // 写入空索引
 
     let state = Arc::new(AppState {
         tera,
@@ -1386,6 +1536,7 @@ async fn main() {
         notifications: RwLock::new(notifications),
         train_mtime: RwLock::new(get_mtime("trains.csv")),
         notif_mtime: RwLock::new(get_mtime("notifications.txt")),
+        order_index: RwLock::new(HashMap::new()),
     });
 
     let state_clone = state.clone();
@@ -1410,6 +1561,15 @@ async fn main() {
         }
     });
 
+    // 构建限流配置
+    let governor_conf = Arc::new(
+        GovernorConfigBuilder::default()
+            .per_second(10) // 每秒允许10个请求
+            .burst_size(30) // 突发峰值30个
+            .finish()
+            .unwrap(),
+    );
+
     let app = Router::new()
         .route("/", get(index))
         .route("/search", get(search))
@@ -1424,15 +1584,23 @@ async fn main() {
         .route("/exchange/query", get(exchange_query))
         .route("/exchange/refund", post(exchange_refund))
         .route("/exchange/change", post(exchange_change))
+        .route("/my_orders", get(my_orders_page))
+        .route("/my_orders/query", get(my_orders_query))
         .route("/tickets/{order_id}", get(tickets_page))
         .route("/ticket/{order_id}/{seat_index}", get(ticket_image))
         .route("/exchange/available", get(exchange_available))
         .route("/diagram", get(diagram_page))
         .route("/admin/reload", get(admin_reload))
         .nest_service("/static", ServeDir::new("static"))
+        .layer(GovernorLayer::new(governor_conf))
         .with_state(state);
 
     let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await.unwrap();
     println!("至冬国铁路已启动：http://localhost:3000");
-    axum::serve(listener, app).await.unwrap();
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await
+    .unwrap();
 }

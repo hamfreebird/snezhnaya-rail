@@ -857,3 +857,21 @@ thead {
     margin: 0;
     font-size: 1.1rem;
 }
+
+.btn-detail {
+    background: #3a5a7a;
+    color: white;
+    padding: 10px 20px;
+    border-radius: 6px;
+    font-size: 1rem;
+    transition: 0.2s;
+    display: inline-block;
+    border: none;
+    cursor: pointer;
+    text-decoration: none;
+    font-weight: bold;
+}
+.btn-detail:hover {
+    background: #4a7a9a;
+    transform: scale(1.02);
+}
