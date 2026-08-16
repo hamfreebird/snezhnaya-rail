@@ -6,6 +6,7 @@
   <div class="order-card">
     <p><strong>订单号：</strong>{{ order.id }}</p>
     <p><strong>车次：</strong>{{ order.train_id }}</p>
+    <p><strong>乘车日期：</strong>{{ order.travel_date }}</p>
     <p><strong>区间：</strong>{{ order.from_station }} → {{ order.to_station }}</p>
     <p><strong>乘客：</strong>{{ order.passenger_name }}</p>
     <p><strong>张数：</strong>{{ order.seat_count }}</p>
@@ -36,44 +37,121 @@
   </div>
 
   <!-- 改签模态框 -->
-  <div id="changeModal"
-    style="display:none; position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.7); z-index:1000;">
-    <div
-      style="background:#1a2238; max-width:600px; margin:50px auto; padding:30px; border-radius:10px; border:1px solid #2a4a6a;">
-      <h3>改签</h3>
-      <form action="/exchange/change" method="post">
-        <input type="hidden" name="order_id" value="{{ order.id }}">
-        <div class="field-group">
-          <label>新车次</label>
-          <select name="new_train_id" required>
-            <!-- 需从后端动态获取可售车次，此处仅作示例 -->
-            <option value="Z001">Z001</option>
-            <option value="Z003">Z003</option>
-          </select>
-        </div>
-        <div class="field-group">
-          <label>出发站</label>
-          <input type="text" name="new_from" required>
-        </div>
-        <div class="field-group">
-          <label>到达站</label>
-          <input type="text" name="new_to" required>
-        </div>
-        <div class="field-group">
-          <label>张数</label>
-          <input type="number" name="new_seat_count" min="1" value="1" required>
-        </div>
-        <div class="form-actions">
-          <button type="submit" class="btn-primary">确认改签</button>
-          <button type="button" onclick="document.getElementById('changeModal').style.display='none'"
-            class="btn-secondary">取消</button>
-        </div>
-      </form>
+  <div id="changeModal" style="display:none; position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.7); z-index:1000;">
+    <div style="background:#1a2238; max-width:750px; margin:50px auto; padding:30px; border-radius:10px; border:1px solid #2a4a6a; max-height:80vh; overflow-y:auto;">
+      <h3>选择新车次</h3>
+      <p>原订单总价：<strong>{{ order.price }} 摩拉</strong></p>
+      <div id="availableTrains" style="margin-bottom:20px;">
+        <p>加载中...</p>
+      </div>
+      <div id="priceDiff" style="margin-bottom:15px; font-weight:bold;"></div>
+      <div class="form-actions">
+        <button id="confirmChangeBtn" class="btn-primary" disabled>确认改签</button>
+        <button type="button" onclick="document.getElementById('changeModal').style.display='none'" class="btn-secondary">取消</button>
+      </div>
     </div>
   </div>
+
   <script>
-    document.getElementById('changeBtn').addEventListener('click', function () {
+    document.getElementById('changeBtn').addEventListener('click', function() {
       document.getElementById('changeModal').style.display = 'block';
+      loadAvailableTrains('{{ order.id }}');
+    });
+
+    const originalPrice = {{ order.price }};
+    let selectedPrice = 0;
+
+    function loadAvailableTrains(orderId) {
+      const container = document.getElementById('availableTrains');
+      const diffDiv = document.getElementById('priceDiff');
+      diffDiv.textContent = '';
+      container.innerHTML = '<p>加载中...</p>';
+      document.getElementById('confirmChangeBtn').disabled = true;
+
+      fetch('/exchange/available?order_id=' + orderId)
+        .then(res => {
+          if (!res.ok) throw new Error('网络响应失败');
+          return res.json();
+        })
+        .then(data => {
+          if (data.length === 0) {
+            container.innerHTML = '<p>没有符合条件的车次。</p>';
+            document.getElementById('confirmChangeBtn').disabled = true;
+            return;
+          }
+          let html = '<table style="width:100%; border-collapse:collapse; margin-top:10px;">';
+          html += '<thead><tr><th>选择</th><th>车次</th><th>出发</th><th>到达</th><th>票价(摩拉)</th><th>余票</th></tr></thead><tbody>';
+          data.forEach((item) => {
+            html += `<tr>
+              <td><input type="radio" name="selected_train" value="${item.id}" data-price="${item.price}" data-seats="${item.seats}"></td>
+              <td>${item.base_train_id} (${item.name})</td>
+              <td>${item.departure}</td>
+              <td>${item.arrival}</td>
+              <td>${item.price}</td>
+              <td>${item.seats}</td>
+            </tr>`;
+          });
+          html += '</tbody></table>';
+          container.innerHTML = html;
+          document.getElementById('confirmChangeBtn').disabled = true;
+
+          // 监听选中变化
+          document.querySelectorAll('input[name="selected_train"]').forEach(radio => {
+            radio.addEventListener('change', function() {
+              const price = parseInt(this.dataset.price);
+              selectedPrice = price;
+              document.getElementById('confirmChangeBtn').disabled = false;
+              // 差价显示
+              const diff = price - originalPrice;
+              if (diff > 0) {
+                diffDiv.textContent = `需补差价：${diff} 摩拉`;
+                diffDiv.style.color = '#ff6b6b';
+              } else if (diff < 0) {
+                diffDiv.textContent = `无需补差价（新车次价格更低）`;
+                diffDiv.style.color = '#5cb85c';
+              } else {
+                diffDiv.textContent = '价格相同，无需补差价';
+                diffDiv.style.color = '#f0ad4e';
+              }
+            });
+          });
+        })
+        .catch(err => {
+          container.innerHTML = '<p>加载失败，请重试。</p>';
+          console.error(err);
+        });
+    }
+
+    document.getElementById('confirmChangeBtn').addEventListener('click', function() {
+      const selected = document.querySelector('input[name="selected_train"]:checked');
+      if (!selected) {
+        alert('请选择一个车次');
+        return;
+      }
+      const trainId = selected.value;
+      // 确认差价
+      const diff = selectedPrice - originalPrice;
+      if (diff > 0) {
+        if (!confirm(`新车次需补差价 ${diff} 摩拉，确认改签吗？`)) {
+          return;
+        }
+      } else {
+        if (!confirm(`确认改签至新车次？`)) {
+          return;
+        }
+      }
+      const form = document.createElement('form');
+      form.method = 'post';
+      form.action = '/exchange/change';
+      form.innerHTML = `
+        <input type="hidden" name="order_id" value="{{ order.id }}">
+        <input type="hidden" name="new_train_id" value="${trainId}">
+        <input type="hidden" name="new_from" value="{{ order.from_station }}">
+        <input type="hidden" name="new_to" value="{{ order.to_station }}">
+        <input type="hidden" name="new_seat_count" value="{{ order.seat_count }}">
+      `;
+      document.body.appendChild(form);
+      form.submit();
     });
   </script>
   {% else %}

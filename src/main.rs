@@ -71,6 +71,7 @@ struct Order {
     expire_at: i64,
     created_at: i64,
     pay_time: Option<i64>,
+    travel_date: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -348,6 +349,20 @@ fn load_trains_static(path: &str) -> Vec<Train> {
                     };
                     departure_times.push(dep_time);
                 }
+            }
+
+            // 校验数据一致性
+            if stations.len() - 1 != prices.len() {
+                panic!("车次 {} 站点数 {} 票价数 {} 不匹配", base_id, stations.len(), prices.len());
+            }
+            if stations.len() - 1 != weights.len() {
+                panic!("车次 {} 站点数 {} 权重数 {} 不匹配", base_id, stations.len(), weights.len());
+            }
+            if stations.len() != platforms.len() {
+                panic!("车次 {} 站点数 {} 站台数 {} 不匹配", base_id, stations.len(), platforms.len());
+            }
+            if stations.len() != stop_mins.len() {
+                panic!("车次 {} 站点数 {} 停靠时间数 {} 不匹配", base_id, stations.len(), stop_mins.len());
             }
 
             trains.push(Train {
@@ -829,6 +844,7 @@ async fn create_order(
         expire_at: expire_at.timestamp(),
         created_at: Utc::now().timestamp(),
         pay_time: None,
+        travel_date: form.date.clone(),
     };
 
     let mut orders = state.orders.write().unwrap();
@@ -1046,10 +1062,12 @@ async fn exchange_change(
         return (StatusCode::BAD_REQUEST, "参数不完整").into_response();
     }
 
+    // 写锁原子操作
     let mut orders = state.orders.write().unwrap();
     let mut sold_counts = state.sold_counts.write().unwrap();
     let mut trains = state.trains.write().unwrap();
 
+    // 1. 验证原订单
     let order = orders.get(&order_id).cloned();
     let order = match order {
         Some(o) => {
@@ -1061,12 +1079,14 @@ async fn exchange_change(
         None => return (StatusCode::NOT_FOUND, "原订单不存在").into_response(),
     };
 
+    // 检查原订单是否已发车
     if let Some(train) = trains.iter().find(|t| t.id == order.train_id) {
         if let Some(first_time_str) = train.departure_times.first().and_then(|o| o.as_ref()) {
             if let Ok(first_time) = NaiveTime::parse_from_str(first_time_str, "%H:%M") {
                 let now = Local::now().naive_local();
-                let base_date = now.date();
-                let dep_datetime = base_date.and_time(first_time);
+                let travel_date = NaiveDate::parse_from_str(&order.travel_date, "%Y-%m-%d")
+                    .unwrap_or(now.date());
+                let dep_datetime = travel_date.and_time(first_time);
                 if now >= dep_datetime {
                     return (StatusCode::BAD_REQUEST, "已发车，不可改签").into_response();
                 }
@@ -1074,6 +1094,7 @@ async fn exchange_change(
         }
     }
 
+    // 2. 释放原票（更新 sold_counts）
     if let Some(train) = trains.iter().find(|t| t.id == order.train_id) {
         if let Some((fi, ti)) = find_interval(train, &order.from_station, &order.to_station) {
             for i in fi..ti {
@@ -1089,15 +1110,17 @@ async fn exchange_change(
         }
     }
 
-    let today = Local::now().date_naive();
+    // 3. 检查新车次是否有效且余票充足
+    let travel_date = NaiveDate::parse_from_str(&order.travel_date, "%Y-%m-%d")
+        .unwrap_or_else(|_| Local::now().date_naive());
     let new_train = trains.iter_mut().find(|t| t.id == new_train_id);
     let new_train = match new_train {
         Some(t) => t,
         None => return (StatusCode::BAD_REQUEST, "新车次不存在").into_response(),
     };
-    let sold_counts_ref = sold_counts.clone();
-    new_train.seats = compute_interval_seats_with_date(new_train, &sold_counts_ref, &today);
-    update_train_status_with_date(new_train, &today);
+    // 刷新新车次状态（基于乘车日期）
+    new_train.seats = compute_interval_seats_with_date(new_train, &sold_counts, &travel_date);
+    update_train_status_with_date(new_train, &travel_date);
     if !new_train.is_selling {
         return (StatusCode::BAD_REQUEST, "新车次已停止售票或已发车").into_response();
     }
@@ -1108,27 +1131,38 @@ async fn exchange_change(
                 return (StatusCode::BAD_REQUEST, "新车次余票不足").into_response();
             }
         }
+        // 扣减新车次余票
         for i in fi..ti {
             new_train.seats[i] -= new_seat_count;
         }
+        // 更新 sold_counts
         for i in fi..ti {
             let key = (new_train_id.clone(), i);
             *sold_counts.entry(key).or_insert(0) += new_seat_count;
         }
-        let total_price: u32 = new_train.prices[fi..ti].iter().sum();
-        let new_price = total_price * new_seat_count;
+        // 计算新车次总价
+        let new_price: u32 = new_train.prices[fi..ti].iter().sum();
+        let final_price = new_price * new_seat_count;
 
+        // 4. 更新原订单
         let order_mut = orders.get_mut(&order_id).unwrap();
         order_mut.train_id = new_train_id.clone();
         order_mut.from_station = new_from.clone();
         order_mut.to_station = new_to.clone();
         order_mut.seat_count = new_seat_count;
-        order_mut.price = new_price;
+        // 差价处理：若新车次价格低于原价，则保持原价不变（不退款）
+        if final_price > order_mut.price {
+            order_mut.price = final_price;
+        }
     } else {
         return (StatusCode::BAD_REQUEST, "新车次无效区间").into_response();
     }
 
-    refresh_trains_with_date(&state, &today);
+    // 5. 手动更新所有列车数据（避免死锁）
+    for t in trains.iter_mut() {
+        t.seats = compute_interval_seats_with_date(t, &sold_counts, &travel_date);
+        update_train_status_with_date(t, &travel_date);
+    }
 
     let mut ctx = Context::new();
     ctx.insert("page_title", "改签成功 - 至冬国铁路");
@@ -1136,6 +1170,80 @@ async fn exchange_change(
     ctx.insert("order_id", &order_id);
     let html = state.tera.render("exchange_result.html", &ctx).unwrap();
     Html(html).into_response()
+}
+
+async fn exchange_available(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<HashMap<String, String>>,
+) -> Response {
+    let order_id = params.get("order_id").cloned().unwrap_or_default();
+    if order_id.is_empty() {
+        return (StatusCode::BAD_REQUEST, "缺少订单号").into_response();
+    }
+
+    let orders = state.orders.read().unwrap();
+    let order = orders.get(&order_id).cloned();
+    let order = match order {
+        Some(o) => o,
+        None => return (StatusCode::NOT_FOUND, "订单不存在").into_response(),
+    };
+
+    // 解析乘车日期
+    let travel_date = NaiveDate::parse_from_str(&order.travel_date, "%Y-%m-%d")
+        .unwrap_or_else(|_| Local::now().date_naive());
+    let weekday = travel_date.weekday().number_from_monday() as u8; // 1=周一
+
+    let from = &order.from_station;
+    let to = &order.to_station;
+
+    let trains = state.trains.read().unwrap();
+    let now = Local::now().naive_local();
+    let mut available = Vec::new();
+
+    for train in trains.iter() {
+        // 1. 运行日匹配
+        if train.run_day != weekday {
+            continue;
+        }
+        // 2. 出发/到达站匹配
+        if let Some((fi, ti)) = find_interval(train, from, to) {
+            // 3. 检查是否已发车（以首站出发时间为准）
+            if let Some(Some(first_dep_str)) = train.departure_times.first() {
+                if let Ok(first_dep) = NaiveTime::parse_from_str(first_dep_str, "%H:%M") {
+                    let dep_datetime = travel_date.and_time(first_dep);
+                    if now >= dep_datetime {
+                        continue; // 已发车
+                    }
+                }
+            }
+            // 4. 检查余票（至少一张）
+            let min_seats = train.seats[fi..ti].iter().min().cloned().unwrap_or(0);
+            if min_seats == 0 {
+                continue;
+            }
+            // 5. 计算区间总价
+            let price: u32 = train.prices[fi..ti].iter().sum();
+            let departure = train.departure_times[fi].as_deref().unwrap_or("");
+            let arrival = train.arrival_times[ti].as_deref().unwrap_or("");
+
+            available.push(serde_json::json!({
+                "id": train.id,
+                "base_train_id": train.base_train_id,
+                "name": train.name,
+                "departure": departure,
+                "arrival": arrival,
+                "price": price,
+                "seats": min_seats,
+            }));
+        }
+    }
+
+    // 按出发时间排序
+    available.sort_by(|a, b| {
+        a["departure"].as_str().unwrap().cmp(b["departure"].as_str().unwrap())
+    });
+
+    ([(header::CONTENT_TYPE, "application/json")], serde_json::to_string(&available).unwrap()).into_response()
 }
 
 // ---------- 车票打印功能 ----------
@@ -1318,6 +1426,7 @@ async fn main() {
         .route("/exchange/change", post(exchange_change))
         .route("/tickets/{order_id}", get(tickets_page))
         .route("/ticket/{order_id}/{seat_index}", get(ticket_image))
+        .route("/exchange/available", get(exchange_available))
         .route("/diagram", get(diagram_page))
         .route("/admin/reload", get(admin_reload))
         .nest_service("/static", ServeDir::new("static"))
