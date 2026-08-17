@@ -1592,7 +1592,7 @@ async fn main() {
         .route("/diagram", get(diagram_page))
         .route("/admin/reload", get(admin_reload))
         .nest_service("/static", ServeDir::new("static"))
-        .layer(GovernorLayer::new(governor_conf))
+        // .layer(GovernorLayer::new(governor_conf))
         .with_state(state);
 
     let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await.unwrap();
