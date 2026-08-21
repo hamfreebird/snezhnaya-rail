@@ -28,9 +28,9 @@ use tower_http::services::ServeDir;
 // ---------- 数据结构 ----------
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct Train {
-    // 唯一ID：格式为 "车次-运行日"，如 "1001-3"
+    // 唯一ID 车次-运行日
     id: String,
-    // 原始车次号（显示用）
+    // 原始车次号
     base_train_id: String,
     // 列车名称
     name: String,
@@ -44,7 +44,7 @@ struct Train {
     arrival_times: Vec<Option<String>>,
     // 出发时间列表（终点站为None）
     departure_times: Vec<Option<String>>,
-    // 区间票价（长度 = stations.len()-1）
+    // 区间票价
     prices: Vec<u32>,
     // 权重
     weights: Vec<u32>,
@@ -55,17 +55,17 @@ struct Train {
     // 状态
     is_departed: bool,
     is_selling: bool,
-    // 运行日（该实例对应的星期几，1=周一）
+    // 运行日
     run_day: u8,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct Order {
     id: String,
-    train_id: String, // 指向 Train.id（唯一ID）
+    train_id: String,
     from_station: String,
     to_station: String,
-    from_platform: String, // 新增：出发站台
+    from_platform: String,
     passenger_name: String,
     seat_count: u32,
     price: u32,
@@ -289,11 +289,10 @@ fn update_train_status_with_date(train: &mut Train, base_date: &NaiveDate) {
         return;
     }
 
-    // 检查运行日是否匹配（由于我们按日拆分实例，train.run_day 应等于 base_date 的星期）
-    // 但 base_date 可能不是今天，我们用 base_date 的星期与 train.run_day 比较
-    let base_weekday = base_date.weekday().number_from_monday() as u8; // 1=周一
+    // 检查运行日是否匹配
+    let base_weekday = base_date.weekday().number_from_monday() as u8;
     if base_weekday != train.run_day {
-        // 如果不匹配，则该实例今天不可售（但显示时可能隐藏）
+        // 如果不匹配，则该实例今天不可售
         train.is_selling = false;
         train.is_departed = false;
         return;
@@ -508,32 +507,28 @@ fn reload_all(state: &Arc<AppState>) {
 // ---------- 车票生成辅助函数 ----------
 fn load_font() -> FontArc {
     let font_paths = [
-        // Windows 常用中文字体
+        // Windows
         "C:/Windows/Fonts/simhei.ttf",
         "C:/Windows/Fonts/msyh.ttc",
         "C:/Windows/Fonts/yahei.ttf",
-        // Linux (需安装 Noto 或文泉驿)
+        // Linux
         "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
         "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
         "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
         // macOS
         "/System/Library/Fonts/PingFang.ttc",
         "/System/Library/Fonts/STHeiti Light.ttc",
-        // 项目内置（请将字体文件放入此目录）
-        "static/fonts/SimHei.ttf",
-        "static/fonts/NotoSansCJK-Regular.ttc",
-        "static/fonts/DejaVuSans.ttf",
+        // 项目内置
         "static/fonts/msyh.ttf",
     ];
     for path in font_paths.iter() {
         if let Ok(data) = fs::read(path) {
             if let Ok(font) = FontArc::try_from_vec(data) {
-                println!("✅ 成功加载字体: {}", path);
+                // println!("成功加载字体: {}", path);
                 return font;
             }
         }
     }
-    // 如果所有字体加载失败，给出明确错误并退出
     panic!("未找到任何可用字体！当前搜索路径: {:?}", font_paths);
 }
 
@@ -568,14 +563,14 @@ fn generate_seat_numbers(train: &Train, count: u32) -> Vec<String> {
     seats
 }
 
-fn generate_ticket_image(order: &Order, seat_number: &str, _train: &Train) -> Vec<u8> {
+fn generate_ticket_image(order: &Order, seat_number: &str, train: &Train) -> Vec<u8> {
     let width = 400;
-    let height = 200;
+    let height = 220;
     let mut img = RgbImage::new(width, height);
 
-    // 1. 创建蓝白渐变背景（从上到下）
-    let top_color = Rgb([50, 90, 170]); // 深蓝
-    let bottom_color = Rgb([220, 235, 255]); // 淡蓝白
+    // 1. 蓝白渐变背景
+    let top_color = Rgb([50, 90, 170]);
+    let bottom_color = Rgb([220, 235, 255]);
     for y in 0..height {
         let t = y as f32 / (height - 1) as f32;
         let r = (top_color[0] as f32 * (1.0 - t) + bottom_color[0] as f32 * t) as u8;
@@ -587,74 +582,51 @@ fn generate_ticket_image(order: &Order, seat_number: &str, _train: &Train) -> Ve
     }
 
     let font = load_font();
-    let dark_blue = Rgb([0, 0, 128]); // 深蓝色文字
-    let scale = PxScale { x: 16.0, y: 16.0 };
+    let red = Rgb([255, 0, 0]);
+    let dark_blue = Rgb([0, 0, 128]);
+    let black = Rgb([0, 0, 0]);
 
-    // 2. 绘制文字（深蓝色）
-    draw_text_mut(&mut img, dark_blue, 10, 10, scale, &font, "+ 至冬国铁路");
-    draw_text_mut(
-        &mut img,
-        dark_blue,
-        10,
-        35,
-        scale,
-        &font,
-        &format!(
-            "{}  {}→{}",
-            order.train_id, order.from_station, order.to_station
-        ),
-    );
-    draw_text_mut(
-        &mut img,
-        dark_blue,
-        10,
-        55,
-        scale,
-        &font,
-        &format!("站台: {}", order.from_platform),
-    );
-    draw_text_mut(
-        &mut img,
-        dark_blue,
-        10,
-        75,
-        scale,
-        &font,
-        &format!("座号: {}", seat_number),
-    );
-    draw_text_mut(
-        &mut img,
-        dark_blue,
-        10,
-        95,
-        scale,
-        &font,
-        &format!("票价: {} 摩拉", order.price / order.seat_count),
-    );
-    draw_text_mut(
-        &mut img,
-        dark_blue,
-        10,
-        115,
-        scale,
-        &font,
-        &format!("订单号: {}", &order.id[..8]),
-    );
-    let bottom_text = "唯我皇安娜丝塔夏将带来无垢的黎明！";
-    draw_text_mut(&mut img, dark_blue, 10, 140, scale, &font, bottom_text);
+    // 2. 左上角：红色订单号
+    let scale_small = PxScale { x: 12.0, y: 12.0 };
+    draw_text_mut(&mut img, red, 10, 10, scale_small, &font, &format!("订单号: {}", order.id));
 
-    // 3. 二维码（右下角，保持黑色）
+    // 3. 右上角：售票站
+    draw_text_mut(&mut img, dark_blue, 280, 10, scale_small, &font, "中央车站售票处");
+
+    // 4. 顶部横排：日期、发车时间、座位号
+    let date = &order.travel_date;
+    let departure_time = train.departure_times[0].as_deref().unwrap_or("");
+    let seat_info = seat_number;
+    let info_line = format!("{}  {}开                             {}", date, departure_time, seat_info);
+    let scale_mid = PxScale { x: 20.0, y: 20.0 };
+    draw_text_mut(&mut img, dark_blue, 10, 35, scale_mid, &font, &info_line);
+
+    // 5. 中部大字：出发站 → 到达站
+    let scale_big = PxScale { x: 36.0, y: 36.0 };
+    draw_text_mut(&mut img, black, 20, 65, scale_big, &font, &format!("{}", order.from_station));
+    draw_text_mut(&mut img, black, 155, 65, scale_big, &font, "→");
+    draw_text_mut(&mut img, black, 220, 65, scale_big, &font, &format!("{}", order.to_station));
+
+    // 6. 车次
+    let scale_mid2 = PxScale { x: 18.0, y: 18.0 };
+    draw_text_mut(&mut img, dark_blue, 10, 120, scale_mid2, &font, &format!("车次: {}", train.base_train_id));
+
+    // 7. 票价与规定
+    let price = order.price / order.seat_count;
+    draw_text_mut(&mut img, dark_blue, 10, 140, scale_mid2, &font, &format!("票价: {} 摩拉", price));
+    draw_text_mut(&mut img, dark_blue, 10, 160, scale_mid2, &font, "限乘当日当次车  中途下车失效");
+    draw_text_mut(&mut img, dark_blue, 10, 180, scale_mid2, &font, "唯我皇安娜丝塔夏将带来无垢的黎明!");
+
+    // 8. 二维码（右下角）
     let qr = QrCode::new(order.id.as_bytes()).unwrap();
     let qr_image = qr.render::<image::Luma<u8>>().build();
-    let qr_resized =
-        image::imageops::resize(&qr_image, 60, 60, image::imageops::FilterType::Nearest);
+    let qr_resized = image::imageops::resize(&qr_image, 60, 60, image::imageops::FilterType::Nearest);
     let qr_rgb = image::DynamicImage::ImageLuma8(qr_resized).into_rgb8();
     image::imageops::overlay(&mut img, &qr_rgb, (width - 70) as i64, (height - 70) as i64);
 
-    // 4. 编码为PNG
+    // 9. 编码为PNG
     let mut buffer = Vec::new();
-    img.write_to(&mut std::io::Cursor::new(&mut buffer), ImageFormat::Png)
-        .unwrap();
+    img.write_to(&mut std::io::Cursor::new(&mut buffer), ImageFormat::Png).unwrap();
     buffer
 }
 
@@ -964,7 +936,7 @@ async fn payment_page(
 // 支付完成后跳转到车票打印页
 async fn pay_order(State(state): State<Arc<AppState>>, Path(order_id): Path<String>) -> Response {
     // 1. 更新订单状态（短时持有写锁）
-    let (passenger_name, order_data) = {
+    let (passenger_name, _order_data) = {
         let mut orders = state.orders.write().unwrap();
         if let Some(order) = orders.get_mut(&order_id) {
             if order.status != OrderStatus::Pending {
@@ -1634,7 +1606,7 @@ async fn main() {
     });
 
     // 构建限流配置
-    let governor_conf = Arc::new(
+    let _governor_conf = Arc::new(
         GovernorConfigBuilder::default()
             .per_second(10) // 每秒允许10个请求
             .burst_size(30) // 突发峰值30个
