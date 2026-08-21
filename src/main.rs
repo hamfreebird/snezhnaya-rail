@@ -23,7 +23,7 @@ use tera::{Context, Tera};
 use tokio::time;
 use tower_governor::{GovernorLayer, governor::GovernorConfigBuilder};
 use tower_http::services::ServeDir;
-use uuid::Uuid;
+// use uuid::Uuid;
 
 // ---------- 数据结构 ----------
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -148,17 +148,33 @@ fn find_interval(train: &Train, from: &str, to: &str) -> Option<(usize, usize)> 
     None
 }
 
-// fn load_order_index() -> HashMap<String, Vec<String>> {
-//     let path = "order_index.json";
-//     fs::read_to_string(path)
-//         .ok()
-//         .and_then(|data| serde_json::from_str(&data).ok())
-//         .unwrap_or_default()
-// }
+fn load_order_index() -> HashMap<String, Vec<String>> {
+    let path = "order_index.json";
+    fs::read_to_string(path)
+        .ok()
+        .and_then(|data| serde_json::from_str(&data).ok())
+        .unwrap_or_default()
+}
 
 fn save_order_index(index: &HashMap<String, Vec<String>>) {
     let data = serde_json::to_string_pretty(index).expect("序列化索引失败");
     fs::write("order_index.json", data).expect("写入索引文件失败");
+}
+
+// 加载所有订单
+fn load_orders() -> HashMap<String, Order> {
+    let path = "orders.json";
+    if let Ok(data) = fs::read_to_string(path) {
+        serde_json::from_str(&data).unwrap_or_else(|_| HashMap::new())
+    } else {
+        HashMap::new()
+    }
+}
+
+// 保存所有订单
+fn save_orders(orders: &HashMap<String, Order>) {
+    let data = serde_json::to_string_pretty(orders).expect("序列化订单失败");
+    fs::write("orders.json", data).expect("写入订单文件失败");
 }
 
 fn compute_interval_seats_with_date(
@@ -883,7 +899,7 @@ async fn create_order(
         return (StatusCode::BAD_REQUEST, "无效的站点区间").into_response();
     }
 
-    let order_id = Uuid::new_v4().to_string();
+    let order_id = format!("{:08}", rand::thread_rng().gen_range(0..100000000));
     let expire_at = Utc::now() + Duration::minutes(30);
     let order = Order {
         id: order_id.clone(),
@@ -903,6 +919,13 @@ async fn create_order(
 
     let mut orders = state.orders.write().unwrap();
     orders.insert(order_id.clone(), order);
+
+    // 保存订单到文件
+    let orders_clone = orders.clone();
+    drop(orders); // 释放写锁
+    tokio::task::spawn_blocking(move || {
+        save_orders(&orders_clone);
+    });
 
     let mut ctx = Context::new();
     ctx.insert("page_title", "占座成功 - 至冬国铁路");
@@ -940,28 +963,42 @@ async fn payment_page(
 
 // 支付完成后跳转到车票打印页
 async fn pay_order(State(state): State<Arc<AppState>>, Path(order_id): Path<String>) -> Response {
-    let mut orders = state.orders.write().unwrap();
-    if let Some(order) = orders.get_mut(&order_id) {
-        if order.status == OrderStatus::Pending {
+    // 1. 更新订单状态（短时持有写锁）
+    let (passenger_name, order_data) = {
+        let mut orders = state.orders.write().unwrap();
+        if let Some(order) = orders.get_mut(&order_id) {
+            if order.status != OrderStatus::Pending {
+                return (StatusCode::BAD_REQUEST, "订单已处理").into_response();
+            }
             order.status = OrderStatus::Paid;
             order.pay_time = Some(Utc::now().timestamp());
-            // ---- 记录订单索引 ----
-            let mut index = state.order_index.write().unwrap();
+            // 提取数据，准备保存
             let name = order.passenger_name.clone();
-            index.entry(name).or_insert_with(Vec::new).push(order_id.clone());
-            // 写回文件（在锁外执行，但此处简单处理）
-            let index_clone = index.clone();
-            drop(index); // 释放锁
-            tokio::task::spawn_blocking(move || {
-                save_order_index(&index_clone);
-            });
-            Redirect::to(&format!("/tickets/{}", order_id)).into_response()
+            let data = order.clone();
+            (name, data)
         } else {
-            (StatusCode::BAD_REQUEST, "订单已处理").into_response()
+            return (StatusCode::NOT_FOUND, "订单不存在").into_response();
         }
-    } else {
-        (StatusCode::NOT_FOUND, "订单不存在").into_response()
+    }; // 写锁自动释放
+
+    // 2. 更新订单索引（短时持有写锁）
+    {
+        let mut index = state.order_index.write().unwrap();
+        index.entry(passenger_name.clone())
+            .or_insert_with(Vec::new)
+            .push(order_id.clone());
+        // 立即同步保存索引文件
+        save_order_index(&index);
+    } // 释放索引锁
+
+    // 3. 保存订单详细信息（同步写入，避免异步导致的延迟）
+    {
+        let orders = state.orders.read().unwrap();
+        save_orders(&orders); // 同步写入
     }
+
+    // 4. 跳转到车票打印页
+    Redirect::to(&format!("/tickets/{}", order_id)).into_response()
 }
 
 async fn orders_query(
@@ -1055,34 +1092,57 @@ async fn exchange_refund(
         return (StatusCode::BAD_REQUEST, "缺少订单号").into_response();
     }
 
-    let mut orders = state.orders.write().unwrap();
-    if let Some(order) = orders.get_mut(&order_id) {
-        if order.status != OrderStatus::Paid {
-            return (StatusCode::BAD_REQUEST, "订单状态不可退签").into_response();
-        }
-        let now = Local::now().naive_local();
-        let trains = state.trains.read().unwrap();
-        let train = trains.iter().find(|t| t.id == order.train_id);
-        if let Some(t) = train {
-            if let Some(first_time_str) = t.departure_times.first().and_then(|o| o.as_ref()) {
-                if let Ok(first_time) = NaiveTime::parse_from_str(first_time_str, "%H:%M") {
-                    let base_date = now.date();
-                    let dep_datetime = base_date.and_time(first_time);
-                    if now >= dep_datetime {
-                        return (StatusCode::BAD_REQUEST, "已发车，不可退签").into_response();
+    // 1. 获取订单并更新状态（在 orders 锁内）
+    let (passenger_name, train_id, from, to, seat_count) = {
+        let mut orders = state.orders.write().unwrap();
+        if let Some(order) = orders.get_mut(&order_id) {
+            if order.status != OrderStatus::Paid {
+                return (StatusCode::BAD_REQUEST, "订单状态不可退签").into_response();
+            }
+            // 检查是否已发车
+            let now = Local::now().naive_local();
+            let trains = state.trains.read().unwrap();
+            let train = trains.iter().find(|t| t.id == order.train_id);
+            if let Some(t) = train {
+                if let Some(first_time_str) = t.departure_times.first().and_then(|o| o.as_ref()) {
+                    if let Ok(first_time) = NaiveTime::parse_from_str(first_time_str, "%H:%M") {
+                        let base_date = now.date();
+                        let dep_datetime = base_date.and_time(first_time);
+                        if now >= dep_datetime {
+                            return (StatusCode::BAD_REQUEST, "已发车，不可退签").into_response();
+                        }
                     }
                 }
             }
+            // 更新状态
+            order.status = OrderStatus::Refunded;
+            // 提取数据
+            let data = (
+                order.passenger_name.clone(),
+                order.train_id.clone(),
+                order.from_station.clone(),
+                order.to_station.clone(),
+                order.seat_count,
+            );
+            // 保存订单（在锁内克隆整个 orders）
+            let orders_clone = orders.clone();
+            drop(orders);
+            tokio::task::spawn_blocking(move || {
+                save_orders(&orders_clone);
+            });
+            data
+        } else {
+            return (StatusCode::NOT_FOUND, "订单不存在").into_response();
         }
+    };
 
-        order.status = OrderStatus::Refunded;
-
-        // 从索引中删除
+    // 2. 更新索引（单独获取 order_index 锁）
+    {
         let mut index = state.order_index.write().unwrap();
-        if let Some(list) = index.get_mut(&order.passenger_name) {
+        if let Some(list) = index.get_mut(&passenger_name) {
             list.retain(|id| id != &order_id);
             if list.is_empty() {
-                index.remove(&order.passenger_name);
+                index.remove(&passenger_name);
             }
         }
         let index_clone = index.clone();
@@ -1090,19 +1150,19 @@ async fn exchange_refund(
         tokio::task::spawn_blocking(move || {
             save_order_index(&index_clone);
         });
+    }
 
+    // 3. 释放余票（获取 sold_counts 和 trains 锁）
+    {
         let mut sold_counts = state.sold_counts.write().unwrap();
-        let train_id = order.train_id.clone();
-        let from = &order.from_station;
-        let to = &order.to_station;
         let trains = state.trains.read().unwrap();
         if let Some(train) = trains.iter().find(|t| t.id == train_id) {
-            if let Some((fi, ti)) = find_interval(train, from, to) {
+            if let Some((fi, ti)) = find_interval(train, &from, &to) {
                 for i in fi..ti {
                     let key = (train_id.clone(), i);
                     if let Some(sold) = sold_counts.get_mut(&key) {
-                        if *sold >= order.seat_count {
-                            *sold -= order.seat_count;
+                        if *sold >= seat_count {
+                            *sold -= seat_count;
                         } else {
                             *sold = 0;
                         }
@@ -1110,18 +1170,18 @@ async fn exchange_refund(
                 }
             }
         }
+        // 刷新余票（基于当前日期）
         let today = Local::now().date_naive();
         refresh_trains_with_date(&state, &today);
-
-        let mut ctx = Context::new();
-        ctx.insert("page_title", "退签成功 - 至冬国铁路");
-        ctx.insert("message", "退签成功，已释放座位");
-        ctx.insert("order_id", &order_id);
-        let html = state.tera.render("exchange_result.html", &ctx).unwrap();
-        Html(html).into_response()
-    } else {
-        (StatusCode::NOT_FOUND, "订单不存在").into_response()
     }
+
+    // 4. 渲染结果
+    let mut ctx = Context::new();
+    ctx.insert("page_title", "退签成功 - 至冬国铁路");
+    ctx.insert("message", "退签成功，已释放座位");
+    ctx.insert("order_id", &order_id);
+    let html = state.tera.render("exchange_result.html", &ctx).unwrap();
+    Html(html).into_response()
 }
 
 async fn exchange_change(
@@ -1234,7 +1294,7 @@ async fn exchange_change(
     };
 
     // 4. 创建新订单
-    let new_order_id = Uuid::new_v4().to_string();
+    let new_order_id = format!("{:08}", rand::thread_rng().gen_range(0..100000000));
     let new_order = Order {
         id: new_order_id.clone(),
         train_id: new_train_id.clone(),
@@ -1269,6 +1329,13 @@ async fn exchange_change(
     drop(index);
     tokio::task::spawn_blocking(move || {
         save_order_index(&index_clone);
+    });
+
+    // 在更新索引后
+    let orders_clone = orders.clone();
+    drop(orders);
+    tokio::task::spawn_blocking(move || {
+        save_orders(&orders_clone);
     });
 
     // 5. 手动更新所有列车数据（避免死锁）
@@ -1524,19 +1591,24 @@ async fn main() {
     }
 
     let notifications = load_notifications("notifications.txt");
-    // 清空旧的订单索引文件，实现初始化时重置订单数据
-    let _ = fs::remove_file("order_index.json");
-    save_order_index(&HashMap::new()); // 写入空索引
+    // 加载订单索引（如果存在）
+    let order_index = if let Ok(data) = fs::read_to_string("order_index.json") {
+        serde_json::from_str(&data).unwrap_or_else(|_| HashMap::new())
+    } else {
+        HashMap::new()
+    };
+    // 加载订单详细信息
+    let orders = load_orders();
 
     let state = Arc::new(AppState {
         tera,
         trains: RwLock::new(trains),
-        orders: RwLock::new(HashMap::new()),
+        orders: RwLock::new(orders),          // 使用加载的订单
         sold_counts: RwLock::new(sold_counts),
         notifications: RwLock::new(notifications),
         train_mtime: RwLock::new(get_mtime("trains.csv")),
         notif_mtime: RwLock::new(get_mtime("notifications.txt")),
-        order_index: RwLock::new(HashMap::new()),
+        order_index: RwLock::new(order_index), // 使用加载的索引
     });
 
     let state_clone = state.clone();

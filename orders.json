@@ -1,0 +1,32 @@
+{
+  "75430322": {
+    "id": "75430322",
+    "train_id": "1002-6",
+    "from_station": "中央车站",
+    "to_station": "中央车站",
+    "from_platform": "2",
+    "passenger_name": "hamfreebird",
+    "seat_count": 1,
+    "price": 1800,
+    "status": "Pending",
+    "expire_at": 1787335217,
+    "created_at": 1787333417,
+    "pay_time": null,
+    "travel_date": "2026-08-22"
+  },
+  "64348141": {
+    "id": "64348141",
+    "train_id": "1002-6",
+    "from_station": "中央车站",
+    "to_station": "中央车站",
+    "from_platform": "2",
+    "passenger_name": "hamfreebird",
+    "seat_count": 1,
+    "price": 1800,
+    "status": "Paid",
+    "expire_at": 1787335358,
+    "created_at": 1787333558,
+    "pay_time": 1787333561,
+    "travel_date": "2026-08-22"
+  }
+}

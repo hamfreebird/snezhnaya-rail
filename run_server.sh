@@ -1,8 +1,8 @@
 #!/bin/bash
 
 # ============================================================
-# 至冬国铁路 服务管理脚本
-# 功能：启动 cargo 服务 + tailscale funnel，定时重启，防休眠，记录日志
+# 至冬国铁路 服务管理脚本（仅重启 tailscale funnel）
+# 功能：启动 cargo 服务 + tailscale funnel，定时重启 funnel，防休眠，记录日志
 # ============================================================
 
 # ---------- 配置项 ----------
@@ -50,32 +50,55 @@ prevent_sleep() {
     fi
 }
 
-# ---------- 启动服务 ----------
-start_services() {
+# ---------- 启动 cargo ----------
+start_cargo() {
     log_info "启动 cargo 服务..."
     cd "$PROJECT_DIR" || exit 1
-    # 在后台启动 cargo，并将输出重定向到日志（同时保留终端输出）
-    cargo run --release &
+    # 在后台启动 cargo，并将输出重定向到日志
+    cargo run --release >> "$LOG_FILE" 2>&1 &
     CARGO_PID=$!
-    log_info "cargo 进程 PID: $CARGO_PID"
-
-    # 等待 cargo 启动（简单等待 3 秒）
-    sleep 3
-
-    log_info "启动 tailscale funnel..."
-    tailscale funnel "$FUNNEL_PORT" &
-    FUNNEL_PID=$!
-    log_info "tailscale funnel PID: $FUNNEL_PID"
-
-    # 保存 PID 文件以便后续终止
     echo "$CARGO_PID" > "$PROJECT_DIR/.cargo.pid"
-    echo "$FUNNEL_PID" > "$PROJECT_DIR/.funnel.pid"
+    log_info "cargo 进程 PID: $CARGO_PID"
+    # 等待 cargo 启动
+    sleep 5
+    # 检查 cargo 是否正常运行
+    if ! kill -0 "$CARGO_PID" 2>/dev/null; then
+        log_error "cargo 启动失败，请检查日志。"
+        exit 1
+    fi
 }
 
-# ---------- 停止服务 ----------
+# ---------- 启动 tailscale funnel（后台模式） ----------
+start_funnel() {
+    log_info "启动 tailscale funnel（后台模式）..."
+    tailscale funnel --bg "$FUNNEL_PORT"
+    if [ $? -eq 0 ]; then
+        log_info "tailscale funnel 启动成功（后台运行）"
+        # 获取 funnel 的 URL（可选）
+        FUNNEL_URL=$(tailscale funnel status 2>/dev/null | grep -o 'https://[^ ]*' | head -1)
+        if [ -n "$FUNNEL_URL" ]; then
+            log_info "公网访问地址: $FUNNEL_URL"
+        fi
+    else
+        log_error "tailscale funnel 启动失败"
+        exit 1
+    fi
+}
+
+# ---------- 重启 tailscale funnel ----------
+restart_funnel() {
+    log_info "========== 开始重启 tailscale funnel =========="
+    log_info "重置当前 funnel..."
+    tailscale funnel reset
+    sleep 2
+    start_funnel
+    log_info "========== tailscale funnel 重启完成 =========="
+}
+
+# ---------- 停止所有服务 ----------
 stop_services() {
     log_info "停止所有服务..."
-    # 读取 PID 并终止
+    # 停止 cargo
     if [ -f "$PROJECT_DIR/.cargo.pid" ]; then
         CARGO_PID=$(cat "$PROJECT_DIR/.cargo.pid")
         if kill -0 "$CARGO_PID" 2>/dev/null; then
@@ -86,43 +109,24 @@ stop_services() {
         fi
         rm -f "$PROJECT_DIR/.cargo.pid"
     else
-        # 如果没有 PID 文件，尝试 pkill
         pkill -f "cargo run" 2>/dev/null && log_info "通过 pkill 终止 cargo"
     fi
 
-    if [ -f "$PROJECT_DIR/.funnel.pid" ]; then
-        FUNNEL_PID=$(cat "$PROJECT_DIR/.funnel.pid")
-        if kill -0 "$FUNNEL_PID" 2>/dev/null; then
-            kill "$FUNNEL_PID"
-            log_info "已终止 funnel 进程 (PID: $FUNNEL_PID)"
-        else
-            log_warn "funnel 进程已不存在 (PID: $FUNNEL_PID)"
-        fi
-        rm -f "$PROJECT_DIR/.funnel.pid"
-    else
-        # 如果 PID 文件不存在，尝试 pkill 或 tailscale funnel reset
-        tailscale funnel reset 2>/dev/null && log_info "通过 tailscale funnel reset 关闭 funnel"
-        pkill -f "tailscale funnel" 2>/dev/null && log_info "通过 pkill 终止 funnel"
-    fi
-}
+    # 停止 tailscale funnel
+    log_info "停止 tailscale funnel..."
+    tailscale funnel reset 2>/dev/null && log_info "已重置 tailscale funnel"
+    pkill -f "tailscale funnel" 2>/dev/null && log_info "通过 pkill 终止 tailscale funnel"
 
-# ---------- 重启服务 ----------
-restart_services() {
-    log_info "========== 开始重启服务 =========="
-    stop_services
-    sleep 2
-    start_services
-    log_info "========== 重启完成 =========="
+    if [ -n "$CAFFEINATE_PID" ]; then
+        kill "$CAFFEINATE_PID" 2>/dev/null
+    fi
+    log_info "所有服务已停止。"
 }
 
 # ---------- 清理退出 ----------
 cleanup() {
     log_info "捕获到退出信号，执行清理..."
     stop_services
-    if [ -n "$CAFFEINATE_PID" ]; then
-        kill "$CAFFEINATE_PID" 2>/dev/null
-    fi
-    log_info "脚本退出。"
     exit 0
 }
 
@@ -139,24 +143,20 @@ main() {
     log_info "  项目目录: $PROJECT_DIR"
     log_info "  日志文件: $LOG_FILE"
     log_info "  重启间隔: $((RESTART_INTERVAL / 60)) 分钟"
+    log_info "  注意：仅重启 tailscale funnel，cargo 持续运行"
     log_info "========================================"
-
-    # 确保 tailscale 权限正确
-    if ! tailscale funnel status &>/dev/null; then
-        log_info "尝试设置 tailscale operator 权限..."
-        sudo tailscale set --operator="$USER" 2>/dev/null || log_warn "设置权限失败，可能需要手动执行：sudo tailscale set --operator=$USER"
-    fi
 
     prevent_sleep
 
-    # 首次启动
-    start_services
+    # 启动服务
+    start_cargo
+    start_funnel
 
-    # 主循环：定时重启
+    # 主循环：定时重启 funnel
     while true; do
-        log_info "等待 $((RESTART_INTERVAL / 60)) 分钟后执行下一次重启..."
+        log_info "等待 $((RESTART_INTERVAL / 60)) 分钟后执行下一次 funnel 重启..."
         sleep "$RESTART_INTERVAL"
-        restart_services
+        restart_funnel
     done
 }
 

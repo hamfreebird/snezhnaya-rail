@@ -1,5 +1,7 @@
 至东国铁路模拟购票系统
 
+需要先安装Cargo，见https://rustwiki.org/zh-CN/cargo/getting-started/installation.html
+
 启动方式：
 ```shell
 cargo run
