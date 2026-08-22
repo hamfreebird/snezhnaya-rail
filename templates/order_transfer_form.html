@@ -1,0 +1,65 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="order-form-container">
+  <h2><i class="fas fa-exchange-alt"></i> 填写换乘订单</h2>
+
+  <!-- 换乘信息卡片 -->
+  <div class="transfer-summary-box">
+    <div class="transfer-legs">
+      <div class="transfer-leg">
+        <div class="leg-header">
+          <span class="leg-badge">第一段</span>
+          <span class="leg-train">车次 {{ first_train_id }}</span>
+        </div>
+        <div class="leg-route">
+          <span class="station">{{ first_from }}</span>
+          <span class="arrow">→</span>
+          <span class="station">{{ first_to }}</span>
+        </div>
+      </div>
+      <div class="transfer-arrow-icon">
+        <i class="fas fa-arrow-down" style="color: #4dc3ff; font-size: 1.5rem;"></i>
+      </div>
+      <div class="transfer-leg">
+        <div class="leg-header">
+          <span class="leg-badge">第二段</span>
+          <span class="leg-train">车次 {{ second_train_id }}</span>
+        </div>
+        <div class="leg-route">
+          <span class="station">{{ second_from }}</span>
+          <span class="arrow">→</span>
+          <span class="station">{{ second_to }}</span>
+        </div>
+      </div>
+    </div>
+    <div class="transfer-total">
+      <span><i class="fas fa-tag"></i> 总票价：<strong>{{ total_price }}</strong> 摩拉</span>
+      <span><i class="fas fa-chair"></i> 余票：<strong>{{ min_seats }}</strong></span>
+    </div>
+  </div>
+
+  <form action="/order/transfer" method="post" class="order-form">
+    <input type="hidden" name="first_train_id" value="{{ first_train_id }}">
+    <input type="hidden" name="first_from" value="{{ first_from }}">
+    <input type="hidden" name="first_to" value="{{ first_to }}">
+    <input type="hidden" name="second_train_id" value="{{ second_train_id }}">
+    <input type="hidden" name="second_from" value="{{ second_from }}">
+    <input type="hidden" name="second_to" value="{{ second_to }}">
+    <input type="hidden" name="date" value="{{ date }}">
+
+    <div class="field-group">
+      <label for="passenger_name"><i class="fas fa-user"></i> 乘客姓名</label>
+      <input type="text" id="passenger_name" name="passenger_name" placeholder="请输入全名" required>
+    </div>
+    <div class="field-group">
+      <label for="seat_count"><i class="fas fa-ticket-alt"></i> 购票张数</label>
+      <input type="number" id="seat_count" name="seat_count" min="1" max="{{ min_seats }}" value="1" required>
+    </div>
+    <div class="form-actions">
+      <button type="submit" class="btn-primary"><i class="fas fa-lock"></i> 提交占座</button>
+      <a href="/" class="btn-secondary"><i class="fas fa-times"></i> 取消</a>
+    </div>
+  </form>
+</div>
+{% endblock %}

@@ -26,6 +26,12 @@
         <label><i class="fas fa-calendar-alt"></i> 日期</label>
         <input type="date" name="date" value="{{ selected_date }}">
       </div>
+      <div class="field-group" style="flex: 0 0 auto; display: flex; align-items: center; gap: 8px;">
+        <input type="hidden" name="mode" id="mode_input" value="{{ mode }}">
+        <button type="button" id="mode_toggle" class="btn-mode {% if mode == "transfer" %}active{% endif %}">
+          <i class="fas fa-exchange-alt"></i> <span id="mode_label">{% if mode == "transfer" %}换乘{% else %}直达{% endif %}</span>
+        </button>
+      </div>
       <button type="submit" class="btn-primary">
         <i class="fas fa-search"></i> 查询
       </button>
@@ -99,5 +105,21 @@
     焰羽谷段铁路因不可抗力停止运营，焰羽谷站暂不开放。
   </p>
 </div>
+
+<script>
+  document.getElementById('mode_toggle').addEventListener('click', function() {
+    const input = document.getElementById('mode_input');
+    const label = document.getElementById('mode_label');
+    if (input.value === 'transfer') {
+      input.value = 'direct';
+      label.textContent = '直达';
+      this.classList.remove('active');
+    } else {
+      input.value = 'transfer';
+      label.textContent = '换乘';
+      this.classList.add('active');
+    }
+  });
+</script>
 
 {% endblock %}

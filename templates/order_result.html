@@ -4,34 +4,64 @@
 <div class="result-container">
   <h2><i class="fas fa-ticket-alt"></i> 订单详情</h2>
   {% if order %}
-  <div class="order-card">
-    <p><strong>订单号：</strong>{{ order.id }}</p>
-    <p><strong>车次：</strong>{{ order.train_id }}</p>
-    <p><strong>乘客：</strong>{{ order.passenger_name }}</p>
-    <p><strong>票数：</strong>{{ order.seat_count }}</p>
-    <p><strong>总价：</strong>{{ order.price }} 摩拉</p>
-    <p><strong>状态：</strong>
-      <span class="status-badge 
-                {%- if order.status == 'Pending' -%}pending
-                {%- elif order.status == 'Paid' -%}paid
-                {%- else -%}cancelled{%- endif -%}">
-        {%- if order.status == 'Pending' -%}待支付
-        {%- elif order.status == 'Paid' -%}已支付
-        {%- else -%}已取消{%- endif -%}
+  <div class="order-detail-card">
+    <div class="detail-row">
+      <span class="label">订单号</span>
+      <span class="value">{{ order.id }}</span>
+    </div>
+    <div class="detail-row">
+      <span class="label">车次</span>
+      <span class="value">{{ order.train_id }}</span>
+    </div>
+    <div class="detail-row">
+      <span class="label">区间</span>
+      <span class="value">{{ order.from_station }} → {{ order.to_station }}</span>
+    </div>
+    <div class="detail-row">
+      <span class="label">乘客</span>
+      <span class="value">{{ order.passenger_name }}</span>
+    </div>
+    <div class="detail-row">
+      <span class="label">票数</span>
+      <span class="value">{{ order.seat_count }}</span>
+    </div>
+    <div class="detail-row highlight">
+      <span class="label">总价</span>
+      <span class="value">{{ order.price }} 摩拉</span>
+    </div>
+    <div class="detail-row">
+      <span class="label">状态</span>
+      <span class="value">
+        <span class="status-badge 
+              {% if order.status == 'Pending' %}pending
+              {% elif order.status == 'Paid' %}paid
+              {% else %}cancelled{% endif %}">
+          {% if order.status == 'Pending' %}待支付
+          {% elif order.status == 'Paid' %}已支付
+          {% else %}已取消{% endif %}
+        </span>
       </span>
-    </p>
+    </div>
+
     {% if order.status == 'Pending' %}
-    <p><strong>剩余支付时间：</strong>
-      <span id="countdown-timer" class="countdown-display">--:--</span>
-    </p>
+    <div class="detail-row">
+      <span class="label">剩余支付时间</span>
+      <span class="value countdown-display" id="countdown-timer">--:--</span>
+    </div>
     <div class="result-actions">
       <a href="/payment/{{ order.id }}" class="btn-primary"><i class="fas fa-credit-card"></i> 继续支付</a>
     </div>
     {% elif order.status == 'Paid' %}
-    <p><i class="fas fa-check-circle" style="color: #4dc3ff;"></i> 支付已完成，感谢您的乘坐！</p>
-    <a href="/tickets/{{ order.id }}" class="btn-primary"><i class="fas fa-print"></i> 打印车票</a>
+    <div class="success-message">
+      <i class="fas fa-check-circle" style="color:#4dc3ff;"></i> 支付已完成，感谢您的乘坐！
+    </div>
+    <div class="result-actions">
+      <a href="/tickets/{{ order.id }}" class="btn-primary"><i class="fas fa-print"></i> 打印车票</a>
+    </div>
     {% else %}
-    <p><i class="fas fa-times-circle" style="color: #ff6b6b;"></i> 该订单已取消。</p>
+    <div class="error-message">
+      <i class="fas fa-times-circle" style="color:#ff6b6b;"></i> 该订单已取消。
+    </div>
     {% endif %}
   </div>
   {% else %}
@@ -45,13 +75,11 @@
 
 {% if order and order.status == 'Pending' %}
 <script>
-  // 从后端获取过期时间戳（字符串形式）
   const expireAtStr = "{{ order.expire_at }}";
   const expireAt = parseInt(expireAtStr, 10);
   const timerElement = document.getElementById('countdown-timer');
-
   if (isNaN(expireAt) || expireAt <= 0) {
-    timerElement.textContent = '时间无效，请联系冬契军';
+    timerElement.textContent = '时间无效，请联系客服';
   } else {
     startCountdown(expireAt, timerElement);
   }

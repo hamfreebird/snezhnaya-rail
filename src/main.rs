@@ -21,9 +21,9 @@ use std::sync::{Arc, RwLock};
 use std::time::{Duration as StdDuration, SystemTime};
 use tera::{Context, Tera};
 use tokio::time;
-use tower_governor::{GovernorLayer, governor::GovernorConfigBuilder};
+use tower_governor::{governor::GovernorConfigBuilder};
 use tower_http::services::ServeDir;
-// use uuid::Uuid;
+use uuid::Uuid;
 
 // ---------- 数据结构 ----------
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -74,6 +74,7 @@ struct Order {
     created_at: i64,
     pay_time: Option<i64>,
     travel_date: String,
+    pub group_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -88,6 +89,45 @@ enum OrderStatus {
 struct Notification {
     title: String,
     content: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ArrivalInfo {
+    train_id: String,
+    base_train_id: String,
+    from_station: String,
+    to_station: String,
+    departure_time: String,
+    arrival_time: String,
+    price: u32,
+    min_seats: u32,
+    fi: usize,
+    ti: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct DepartureInfo {
+    train_id: String,
+    base_train_id: String,
+    from_station: String,
+    to_station: String,
+    departure_time: String,
+    arrival_time: String,
+    price: u32,
+    min_seats: u32,
+    fi: usize,
+    ti: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct TransferPlan {
+    pub first_train: ArrivalInfo,
+    pub second_train: DepartureInfo,
+    pub transfer_station: String,
+    pub transfer_wait: i64,
+    pub total_duration: i64,
+    pub total_price: u32,
+    pub min_seats: u32,
 }
 
 // ---------- 应用状态 ----------
@@ -108,6 +148,7 @@ struct SearchParams {
     from: String,
     to: String,
     date: Option<String>,
+    mode: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -119,6 +160,19 @@ struct CreateOrderForm {
     total_price: u32,
     passenger_name: String,
     seat_count: u32,
+    date: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct TransferOrderForm {
+    first_train_id: String,
+    first_from: String,
+    first_to: String,
+    second_train_id: String,
+    second_from: String,
+    second_to: String,
+    seat_count: u32,
+    passenger_name: String,
     date: String,
 }
 
@@ -148,12 +202,146 @@ fn find_interval(train: &Train, from: &str, to: &str) -> Option<(usize, usize)> 
     None
 }
 
-fn load_order_index() -> HashMap<String, Vec<String>> {
-    let path = "order_index.json";
-    fs::read_to_string(path)
-        .ok()
-        .and_then(|data| serde_json::from_str(&data).ok())
-        .unwrap_or_default()
+/// 查找所有可行的中转换乘方案
+/// 返回 Vec<TransferPlan>，按总时长升序
+fn find_transfers(
+    trains: &[Train],
+    from: &str,
+    to: &str,
+    travel_date: &NaiveDate,
+    min_transfer: i64, // 分钟
+) -> Vec<TransferPlan> {
+    let weekday = travel_date.weekday().number_from_monday() as u8;
+    let now = Local::now().naive_local();
+
+    // 筛选当日可售车次
+    let available: Vec<&Train> = trains
+        .iter()
+        .filter(|t| t.run_day == weekday && t.is_selling && !t.is_departed)
+        .collect();
+
+    // 1. 构建到达换乘站索引: Map<换乘站, Vec<(车次, 到达时间, 区间票价, 最小余票, 区间索引)>>
+    let mut arrival_map: HashMap<String, Vec<ArrivalInfo>> = HashMap::new();
+    for train in &available {
+        if let Some(fi) = train.stations.iter().position(|s| s == from) {
+            for i in (fi + 1)..train.stations.len() {
+                let x = &train.stations[i];
+                let arrival_time = train.arrival_times[i].as_ref().unwrap();
+                let price: u32 = train.prices[fi..i].iter().sum();
+                let min_seats = train.seats[fi..i].iter().min().cloned().unwrap_or(0);
+                // 检查是否已发车（对应当天日期）
+                if let Ok(arr_dt) = NaiveTime::parse_from_str(arrival_time, "%H:%M") {
+                    let dep_datetime = travel_date.and_time(arr_dt);
+                    if now >= dep_datetime {
+                        continue; // 已过到达时间，不可用
+                    }
+                }
+                arrival_map.entry(x.clone()).or_default().push(ArrivalInfo {
+                    train_id: train.id.clone(),
+                    base_train_id: train.base_train_id.clone(),
+                    from_station: from.to_string(),
+                    to_station: x.clone(),
+                    departure_time: train.departure_times[fi].as_ref().unwrap().clone(),
+                    arrival_time: arrival_time.clone(),
+                    price,
+                    min_seats,
+                    fi,
+                    ti: i,
+                });
+            }
+        }
+    }
+
+    // 2. 构建出发换乘站索引: Map<换乘站, Vec<(车次, 出发时间, 区间票价, 最小余票, 区间索引)>>
+    let mut departure_map: HashMap<String, Vec<DepartureInfo>> = HashMap::new();
+    for train in &available {
+        if let Some(ti) = train.stations.iter().position(|s| s == to) {
+            for i in 0..ti {
+                let x = &train.stations[i];
+                let dep_time = train.departure_times[i].as_ref().unwrap();
+                let price: u32 = train.prices[i..ti].iter().sum();
+                let min_seats = train.seats[i..ti].iter().min().cloned().unwrap_or(0);
+                // 检查是否已发车
+                if let Ok(dep_dt) = NaiveTime::parse_from_str(dep_time, "%H:%M") {
+                    let dep_datetime = travel_date.and_time(dep_dt);
+                    if now >= dep_datetime {
+                        continue;
+                    }
+                }
+                departure_map.entry(x.clone()).or_default().push(DepartureInfo {
+                    train_id: train.id.clone(),
+                    base_train_id: train.base_train_id.clone(),
+                    from_station: x.clone(),
+                    to_station: to.to_string(),
+                    departure_time: dep_time.clone(),
+                    arrival_time: train.arrival_times[ti].as_ref().unwrap().clone(),
+                    price,
+                    min_seats,
+                    fi: i,
+                    ti,
+                });
+            }
+        }
+    }
+
+    // 3. 匹配换乘组合
+    let mut plans = Vec::new();
+    for (x, arrivals) in arrival_map {
+        if let Some(departures) = departure_map.get(&x) {
+            for a in arrivals {
+                for d in departures {
+                    // 同一车次不允许（避免同一班次折返）
+                    if a.train_id == d.train_id {
+                        continue;
+                    }
+                    // 计算换乘等待时间
+                    let arr_time = NaiveTime::parse_from_str(&a.arrival_time, "%H:%M").unwrap();
+                    let dep_time = NaiveTime::parse_from_str(&d.departure_time, "%H:%M").unwrap();
+                    // 假设同一天，若跨天则需额外处理，但此处简化
+                    let wait_minutes = (dep_time - arr_time).num_minutes();
+                    if wait_minutes < min_transfer {
+                        continue;
+                    }
+                    // 总时长 = 第一段运行时间 + 等待 + 第二段运行时间
+                    let first_dep = NaiveTime::parse_from_str(&a.departure_time, "%H:%M").unwrap();
+                    let first_dur = (NaiveTime::parse_from_str(&a.arrival_time, "%H:%M").unwrap() - first_dep).num_minutes();
+                    let second_dep = NaiveTime::parse_from_str(&d.departure_time, "%H:%M").unwrap();
+                    let second_dur = (NaiveTime::parse_from_str(&d.arrival_time, "%H:%M").unwrap() - second_dep).num_minutes();
+                    let total_duration = first_dur + wait_minutes + second_dur;
+
+                    let total_price = a.price + d.price;
+                    let min_seats = a.min_seats.min(d.min_seats);
+
+                    plans.push(TransferPlan {
+                        first_train: a.clone(),
+                        second_train: d.clone(),
+                        transfer_station: x.clone(),
+                        transfer_wait: wait_minutes,
+                        total_duration,
+                        total_price,
+                        min_seats,
+                    });
+                }
+            }
+        }
+    }
+
+    // 按总时长升序
+    plans.sort_by_key(|p| p.total_duration);
+    plans.retain(|p| p.min_seats > 0);
+    plans.truncate(50); // 最多返回20条
+    plans
+}
+
+/// 生成一个8位数字订单号，确保与现有订单不重复
+fn generate_unique_order_id(orders: &HashMap<String, Order>) -> String {
+    let mut rng = rand::thread_rng();
+    loop {
+        let id = format!("{:08}", rng.gen_range(0..100000000));
+        if !orders.contains_key(&id) {
+            return id;
+        }
+    }
 }
 
 fn save_order_index(index: &HashMap<String, Vec<String>>) {
@@ -603,8 +791,9 @@ fn generate_ticket_image(order: &Order, seat_number: &str, train: &Train) -> Vec
 
     // 5. 中部大字：出发站 → 到达站
     let scale_big = PxScale { x: 36.0, y: 36.0 };
+    let scale_big_line = PxScale { x: 72.0, y: 36.0 };
     draw_text_mut(&mut img, black, 20, 65, scale_big, &font, &format!("{}", order.from_station));
-    draw_text_mut(&mut img, black, 155, 65, scale_big, &font, "→");
+    draw_text_mut(&mut img, black, 140, 65, scale_big_line, &font, "→");
     draw_text_mut(&mut img, black, 220, 65, scale_big, &font, &format!("{}", order.to_station));
 
     // 6. 车次
@@ -636,6 +825,7 @@ async fn index(State(state): State<Arc<AppState>>) -> Response {
     refresh_trains_with_date(&state, &today);
     let mut ctx = Context::new();
     ctx.insert("page_title", "至冬国铁路 - 首页");
+    ctx.insert("mode", "direct");
     let trains = state.trains.read().unwrap();
 
     let mut all_stations = HashSet::new();
@@ -713,9 +903,36 @@ async fn search(
     let base_date =
         NaiveDate::parse_from_str(&date_str, "%Y-%m-%d").unwrap_or(Local::now().date_naive());
     refresh_trains_with_date(&state, &base_date);
+
+    let mode = params.mode.clone().unwrap_or_else(|| "direct".to_string());
     let trains = state.trains.read().unwrap();
     let from = params.from.trim();
     let to = params.to.trim();
+
+    if mode == "transfer" {
+        // 换乘搜索
+        let trains = state.trains.read().unwrap();
+        let plans = find_transfers(&trains, from, to, &base_date, 8);
+        let mut ctx = Context::new();
+        ctx.insert("page_title", "中转换乘方案 - 至冬国铁路");
+        ctx.insert("plans", &plans);
+        ctx.insert("from", from);
+        ctx.insert("to", to);
+        ctx.insert("selected_date", &date_str);
+        // 站点列表（复用）
+        let mut all_stations = HashSet::new();
+        for train in trains.iter() {
+            for station in &train.stations {
+                all_stations.insert(station.clone());
+            }
+        }
+        let mut stations_vec: Vec<String> = all_stations.into_iter().collect();
+        stations_vec.sort();
+        ctx.insert("stations", &stations_vec);
+        ctx.insert("mode", "transfer");
+        let html = state.tera.render("search_results.html", &ctx).unwrap();
+        return Html(html).into_response();
+    }
 
     let mut results = Vec::new();
     for train in trains.iter() {
@@ -769,6 +986,7 @@ async fn search(
     ctx.insert("from", from);
     ctx.insert("to", to);
     ctx.insert("selected_date", &date_str);
+    ctx.insert("mode", "direct");
 
     let mut all_stations = HashSet::new();
     for train in trains.iter() {
@@ -835,6 +1053,187 @@ async fn order_form(
     (StatusCode::NOT_FOUND, "车次不存在").into_response()
 }
 
+async fn order_transfer(
+    State(state): State<Arc<AppState>>,
+    Form(form): Form<TransferOrderForm>,
+) -> Response {
+    let base_date = NaiveDate::parse_from_str(&form.date, "%Y-%m-%d")
+        .unwrap_or_else(|_| Local::now().date_naive());
+    refresh_trains_with_date(&state, &base_date);
+
+    let (_order1_id, _order2_id, group_id) = {
+        let mut trains = state.trains.write().unwrap();
+        let mut sold_counts = state.sold_counts.write().unwrap();
+        let mut orders = state.orders.write().unwrap();
+
+        // 获取两个车次的索引
+        let train1_idx = match trains.iter().position(|t| t.id == form.first_train_id) {
+            Some(idx) => idx,
+            None => return (StatusCode::BAD_REQUEST, "第一段车次不存在").into_response(),
+        };
+        let train2_idx = match trains.iter().position(|t| t.id == form.second_train_id) {
+            Some(idx) => idx,
+            None => return (StatusCode::BAD_REQUEST, "第二段车次不存在").into_response(),
+        };
+
+        // 检查第一段车次
+        let (fi1, ti1, price1) = {
+            let train1 = &trains[train1_idx];
+            if !train1.is_selling {
+                return (StatusCode::BAD_REQUEST, "第一段车次已停止售票").into_response();
+            }
+            let (fi, ti) = match find_interval(train1, &form.first_from, &form.first_to) {
+                Some((f, t)) => (f, t),
+                None => return (StatusCode::BAD_REQUEST, "第一段无效区间").into_response(),
+            };
+            for i in fi..ti {
+                if train1.seats[i] < form.seat_count {
+                    return (StatusCode::BAD_REQUEST, "第一段余票不足").into_response();
+                }
+            }
+            let price: u32 = train1.prices[fi..ti].iter().sum();
+            (fi, ti, price)
+        };
+
+        // 检查第二段车次
+        let (fi2, ti2, price2) = {
+            let train2 = &trains[train2_idx];
+            if !train2.is_selling {
+                return (StatusCode::BAD_REQUEST, "第二段车次已停止售票").into_response();
+            }
+            let (fi, ti) = match find_interval(train2, &form.second_from, &form.second_to) {
+                Some((f, t)) => (f, t),
+                None => return (StatusCode::BAD_REQUEST, "第二段无效区间").into_response(),
+            };
+            for i in fi..ti {
+                if train2.seats[i] < form.seat_count {
+                    return (StatusCode::BAD_REQUEST, "第二段余票不足").into_response();
+                }
+            }
+            let price: u32 = train2.prices[fi..ti].iter().sum();
+            (fi, ti, price)
+        };
+
+        // 扣减第一段车次余票
+        {
+            let train1 = &mut trains[train1_idx];
+            for i in fi1..ti1 {
+                train1.seats[i] -= form.seat_count;
+                let key = (form.first_train_id.clone(), i);
+                *sold_counts.entry(key).or_insert(0) += form.seat_count;
+            }
+        }
+
+        // 扣减第二段车次余票
+        {
+            let train2 = &mut trains[train2_idx];
+            for i in fi2..ti2 {
+                train2.seats[i] -= form.seat_count;
+                let key = (form.second_train_id.clone(), i);
+                *sold_counts.entry(key).or_insert(0) += form.seat_count;
+            }
+        }
+
+        // 计算总票价
+        let total_price1 = price1 * form.seat_count;
+        let total_price2 = price2 * form.seat_count;
+
+        // 创建订单
+        let group_id = Uuid::new_v4().to_string();
+        let expire_at = Utc::now() + Duration::minutes(30);
+
+        let order1_id = generate_unique_order_id(&orders);
+        let order2_id = generate_unique_order_id(&orders);
+
+        let order1 = Order {
+            id: order1_id.clone(),
+            train_id: form.first_train_id,
+            from_station: form.first_from.clone(),
+            to_station: form.first_to.clone(),
+            from_platform: {
+                let train1 = &trains[train1_idx];
+                train1.platforms[fi1].clone()
+            },
+            passenger_name: form.passenger_name.clone(),
+            seat_count: form.seat_count,
+            price: total_price1,
+            status: OrderStatus::Pending,
+            expire_at: expire_at.timestamp(),
+            created_at: Utc::now().timestamp(),
+            pay_time: None,
+            travel_date: form.date.clone(),
+            group_id: Some(group_id.clone()),
+        };
+        let order2 = Order {
+            id: order2_id.clone(),
+            train_id: form.second_train_id,
+            from_station: form.second_from.clone(),
+            to_station: form.second_to.clone(),
+            from_platform: {
+                let train2 = &trains[train2_idx];
+                train2.platforms[fi2].clone()
+            },
+            passenger_name: form.passenger_name.clone(),
+            seat_count: form.seat_count,
+            price: total_price2,
+            status: OrderStatus::Pending,
+            expire_at: expire_at.timestamp(),
+            created_at: Utc::now().timestamp(),
+            pay_time: None,
+            travel_date: form.date.clone(),
+            group_id: Some(group_id.clone()),
+        };
+
+        orders.insert(order1_id.clone(), order1);
+        orders.insert(order2_id.clone(), order2);
+
+        // 保存订单到文件
+        let orders_clone = orders.clone();
+        drop(orders); // 释放写锁
+        tokio::task::spawn_blocking(move || {
+            save_orders(&orders_clone);
+        });
+
+        (order1_id, order2_id, group_id)
+    };
+
+    // 重定向到换乘确认页
+    Redirect::to(&format!("/transfer_confirm?group_id={}", group_id)).into_response()
+}
+
+async fn order_transfer_form(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<HashMap<String, String>>,
+) -> Response {
+    let first_train_id = params.get("first_train_id").cloned().unwrap_or_default();
+    let first_from = params.get("first_from").cloned().unwrap_or_default();
+    let first_to = params.get("first_to").cloned().unwrap_or_default();
+    let second_train_id = params.get("second_train_id").cloned().unwrap_or_default();
+    let second_from = params.get("second_from").cloned().unwrap_or_default();
+    let second_to = params.get("second_to").cloned().unwrap_or_default();
+    let date = params.get("date").cloned().unwrap_or_default();
+    let total_price = params.get("total_price").cloned().unwrap_or_default();
+    let min_seats = params.get("min_seats").cloned().unwrap_or_default();
+
+    if first_train_id.is_empty() || second_train_id.is_empty() {
+        return (StatusCode::BAD_REQUEST, "参数不完整").into_response();
+    }
+
+    let mut ctx = Context::new();
+    ctx.insert("page_title", "填写换乘订单 - 至冬国铁路");
+    ctx.insert("first_train_id", &first_train_id);
+    ctx.insert("first_from", &first_from);
+    ctx.insert("first_to", &first_to);
+    ctx.insert("second_train_id", &second_train_id);
+    ctx.insert("second_from", &second_from);
+    ctx.insert("second_to", &second_to);
+    ctx.insert("date", &date);
+    ctx.insert("total_price", &total_price);
+    ctx.insert("min_seats", &min_seats);
+    let html = state.tera.render("order_transfer_form.html", &ctx).unwrap();
+    Html(html).into_response()
+}
+
 async fn create_order(
     State(state): State<Arc<AppState>>,
     Form(form): Form<CreateOrderForm>,
@@ -871,7 +1270,8 @@ async fn create_order(
         return (StatusCode::BAD_REQUEST, "无效的站点区间").into_response();
     }
 
-    let order_id = format!("{:08}", rand::thread_rng().gen_range(0..100000000));
+    let mut orders = state.orders.write().unwrap();
+    let order_id = generate_unique_order_id(&orders);
     let expire_at = Utc::now() + Duration::minutes(30);
     let order = Order {
         id: order_id.clone(),
@@ -887,9 +1287,8 @@ async fn create_order(
         created_at: Utc::now().timestamp(),
         pay_time: None,
         travel_date: form.date.clone(),
+        group_id: None,
     };
-
-    let mut orders = state.orders.write().unwrap();
     orders.insert(order_id.clone(), order);
 
     // 保存订单到文件
@@ -936,7 +1335,7 @@ async fn payment_page(
 // 支付完成后跳转到车票打印页
 async fn pay_order(State(state): State<Arc<AppState>>, Path(order_id): Path<String>) -> Response {
     // 1. 更新订单状态（短时持有写锁）
-    let (passenger_name, _order_data) = {
+    let (passenger_name, order_data) = {
         let mut orders = state.orders.write().unwrap();
         if let Some(order) = orders.get_mut(&order_id) {
             if order.status != OrderStatus::Pending {
@@ -959,18 +1358,23 @@ async fn pay_order(State(state): State<Arc<AppState>>, Path(order_id): Path<Stri
         index.entry(passenger_name.clone())
             .or_insert_with(Vec::new)
             .push(order_id.clone());
-        // 立即同步保存索引文件
         save_order_index(&index);
-    } // 释放索引锁
-
-    // 3. 保存订单详细信息（同步写入，避免异步导致的延迟）
-    {
-        let orders = state.orders.read().unwrap();
-        save_orders(&orders); // 同步写入
     }
 
-    // 4. 跳转到车票打印页
-    Redirect::to(&format!("/tickets/{}", order_id)).into_response()
+    // 3. 保存订单详细信息
+    {
+        let orders = state.orders.read().unwrap();
+        save_orders(&orders);
+    }
+
+    // 4. 判断是否为换乘订单
+    if let Some(group_id) = &order_data.group_id {
+        // 重定向到换乘确认页
+        Redirect::to(&format!("/transfer_confirm?group_id={}", group_id)).into_response()
+    } else {
+        // 普通订单跳转到车票打印
+        Redirect::to(&format!("/tickets/{}", order_id)).into_response()
+    }
 }
 
 async fn orders_query(
@@ -1266,7 +1670,7 @@ async fn exchange_change(
     };
 
     // 4. 创建新订单
-    let new_order_id = format!("{:08}", rand::thread_rng().gen_range(0..100000000));
+    let new_order_id = generate_unique_order_id(&orders);
     let new_order = Order {
         id: new_order_id.clone(),
         train_id: new_train_id.clone(),
@@ -1281,6 +1685,7 @@ async fn exchange_change(
         created_at: Utc::now().timestamp(),
         pay_time: Some(Utc::now().timestamp()),
         travel_date: order.travel_date.clone(),
+        group_id: None,
     };
 
     // 原订单标记为取消
@@ -1541,6 +1946,34 @@ async fn my_orders_query(
     Html(html).into_response()
 }
 
+async fn transfer_confirm(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<HashMap<String, String>>,
+) -> Response {
+    let group_id = params.get("group_id").cloned().unwrap_or_default();
+    if group_id.is_empty() {
+        return (StatusCode::BAD_REQUEST, "缺少 group_id").into_response();
+    }
+
+    let orders = state.orders.read().unwrap();
+    let group_orders: Vec<&Order> = orders
+        .values()
+        .filter(|o| o.group_id.as_ref() == Some(&group_id))
+        .collect();
+    if group_orders.is_empty() {
+        return (StatusCode::NOT_FOUND, "未找到该换乘组订单").into_response();
+    }
+
+    let passenger_name = group_orders[0].passenger_name.clone();
+    let mut ctx = Context::new();
+    ctx.insert("page_title", "换乘订单支付 - 至冬国铁路");
+    ctx.insert("group_id", &group_id);
+    ctx.insert("orders", &group_orders);
+    ctx.insert("passenger_name", &passenger_name);
+    let html = state.tera.render("transfer_confirm.html", &ctx).unwrap();
+    Html(html).into_response()
+}
+
 // ---------- 主函数 ----------
 #[tokio::main]
 async fn main() {
@@ -1619,6 +2052,8 @@ async fn main() {
         .route("/search", get(search))
         .route("/order/create", post(create_order))
         .route("/order/{train_id}", get(order_form))
+        .route("/order/transfer", post(order_transfer))
+        .route("/order/transfer_form", get(order_transfer_form))
         .route("/orders", get(orders_query))
         .route("/detail/{train_id}", get(detail_page))
         .route("/payment/{order_id}/pay", get(pay_order))
@@ -1628,6 +2063,7 @@ async fn main() {
         .route("/exchange/query", get(exchange_query))
         .route("/exchange/refund", post(exchange_refund))
         .route("/exchange/change", post(exchange_change))
+        .route("/transfer_confirm", get(transfer_confirm))
         .route("/my_orders", get(my_orders_page))
         .route("/my_orders/query", get(my_orders_query))
         .route("/tickets/{order_id}", get(tickets_page))

@@ -3,14 +3,32 @@
 {% block content %}
 <div class="payment-container">
   <h2><i class="fas fa-credit-card"></i> 支付确认</h2>
-  <div class="payment-details">
-    <p><strong>订单号：</strong>{{ order.id }}</p>
-    <p><strong>车次：</strong>{{ base_train_id }}</p>
-    <p><strong>乘客：</strong>{{ order.passenger_name }}</p>
-    <p><strong>张数：</strong>{{ order.seat_count }}</p>
-    <p><strong>总金额：</strong>{{ order.price }} 摩拉</p>
+  <div class="payment-card">
+    <div class="payment-row">
+      <span class="label">订单号</span>
+      <span class="value">{{ order.id }}</span>
+    </div>
+    <div class="payment-row">
+      <span class="label">车次</span>
+      <span class="value">{{ base_train_id }}</span>
+    </div>
+    <div class="payment-row">
+      <span class="label">区间</span>
+      <span class="value">{{ order.from_station }} → {{ order.to_station }}</span>
+    </div>
+    <div class="payment-row">
+      <span class="label">乘客</span>
+      <span class="value">{{ order.passenger_name }}</span>
+    </div>
+    <div class="payment-row">
+      <span class="label">张数</span>
+      <span class="value">{{ order.seat_count }}</span>
+    </div>
+    <div class="payment-row total">
+      <span class="label">总金额</span>
+      <span class="value">{{ order.price }} 摩拉</span>
+    </div>
   </div>
-  <td>   </td>
   <div class="payment-actions">
     <a href="/payment/{{ order.id }}/pay" class="btn-primary"><i class="fas fa-check"></i> 确认支付</a>
     <a href="/" class="btn-secondary"><i class="fas fa-times"></i> 取消</a>

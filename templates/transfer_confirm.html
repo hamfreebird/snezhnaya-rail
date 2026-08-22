@@ -1,0 +1,43 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="transfer-confirm-container">
+  <h2><i class="fas fa-exchange-alt"></i> 换乘订单支付</h2>
+  <p class="passenger-info"><i class="fas fa-user"></i> 乘客：<strong>{{ passenger_name }}</strong></p>
+
+  <div class="transfer-order-group">
+    {% for order in orders %}
+    <div class="order-item-card">
+      <div class="order-header">
+        <span class="order-badge">车次 {{ order.train_id }}</span>
+        <span class="order-price">{{ order.price }} 摩拉</span>
+      </div>
+      <div class="order-route">
+        <span class="station">{{ order.from_station }}</span>
+        <span class="arrow">→</span>
+        <span class="station">{{ order.to_station }}</span>
+      </div>
+      <div class="order-status-row">
+        <span class="status-label">状态：</span>
+        {% if order.status == "Pending" %}
+          <span class="status-badge pending">待支付</span>
+          <a href="/payment/{{ order.id }}" class="btn-primary btn-sm">立即支付</a>
+        {% elif order.status == "Paid" %}
+          <span class="status-badge paid">已支付</span>
+          <a href="/tickets/{{ order.id }}" class="btn-secondary btn-sm">查看车票</a>
+        {% else %}
+          <span class="status-badge cancelled">已取消</span>
+        {% endif %}
+      </div>
+    </div>
+    {% endfor %}
+  </div>
+
+  <div class="notice-box">
+    <i class="fas fa-info-circle"></i> 所有订单支付完成后，可分别打印车票。
+  </div>
+  <div class="transfer-confirm-actions">
+    <a href="/" class="btn-secondary"><i class="fas fa-home"></i> 返回首页</a>
+  </div>
+</div>
+{% endblock %}

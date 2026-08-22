@@ -26,6 +26,12 @@
         <label><i class="fas fa-calendar-alt"></i> 日期</label>
         <input type="date" name="date" value="{{ selected_date }}">
       </div>
+      <div class="field-group" style="flex: 0 0 auto; display: flex; align-items: center; gap: 8px;">
+        <input type="hidden" name="mode" id="mode_input" value="{{ mode }}">
+        <button type="button" id="mode_toggle" class="btn-mode {% if mode == "transfer" %}active{% endif %}">
+          <i class="fas fa-exchange-alt"></i> <span id="mode_label">{% if mode == "transfer" %}换乘{% else %}直达{% endif %}</span>
+        </button>
+      </div>
       <button type="submit" class="btn-primary">
         <i class="fas fa-search"></i> 查询
       </button>
@@ -33,7 +39,73 @@
   </div>
 </div>
 
-<div class="train-list">
+{% if mode == "transfer" %}
+<div class="transfer-results">
+  <h2><i class="fas fa-exchange-alt"></i> 中转换乘方案：{{ from }} → {{ to }}</h2>
+  <div class="transfer-spacer"></div>
+  <div class="notice-tip">
+    <i class="fas fa-info-circle"></i> 
+    至多显示50条方案，按总时长从小到大显示。
+  </div>
+  <div class="transfer-spacer"></div>
+  {% if plans %}
+    {% for plan in plans %}
+    <div class="transfer-card">
+      <div class="transfer-header">
+        <span class="train-badge">{{ plan.first_train.base_train_id }}</span>
+        <span class="arrow">→</span>
+        <span class="train-badge">{{ plan.second_train.base_train_id }}</span>
+        <span class="total-time" style="color: #4dc3ff; font-weight: bold;">
+          <i class="fas fa-clock"></i> {{ plan.total_duration }} 分钟
+        </span>
+      </div>
+      <div class="transfer-body">
+        <!-- 第一段：出发站 时间 → 到达站 时间 -->
+        <div class="leg">
+          <span class="station-info">
+            <strong>{{ plan.first_train.from_station }}</strong>
+            <span class="time">{{ plan.first_train.departure_time }}</span>
+          </span>
+          <span class="arrow-symbol">→</span>
+          <span class="station-info">
+            <strong>{{ plan.first_train.to_station }}</strong>
+            <span class="time">{{ plan.first_train.arrival_time }}</span>
+          </span>
+          <span class="price-info">票价：{{ plan.first_train.price }} 摩拉</span>
+        </div>
+        <!-- 换乘等待 -->
+        <div class="transfer-wait">
+          <i class="fas fa-arrows-alt-h"></i> 换乘 {{ plan.transfer_station }} 等待 {{ plan.transfer_wait }} 分钟
+        </div>
+        <!-- 第二段 -->
+        <div class="leg">
+          <span class="station-info">
+            <strong>{{ plan.second_train.from_station }}</strong>
+            <span class="time">{{ plan.second_train.departure_time }}</span>
+          </span>
+          <span class="arrow-symbol">→</span>
+          <span class="station-info">
+            <strong>{{ plan.second_train.to_station }}</strong>
+            <span class="time">{{ plan.second_train.arrival_time }}</span>
+          </span>
+          <span class="price-info">票价：{{ plan.second_train.price }} 摩拉</span>
+        </div>
+        <!-- 底部汇总 -->
+        <div class="transfer-summary">
+          <span>总票价：<strong>{{ plan.total_price }}</strong> 摩拉</span>
+          <span>余票：{{ plan.min_seats }}</span>
+          <a href="/order/transfer_form?first_train_id={{ plan.first_train.train_id }}&first_from={{ plan.first_train.from_station }}&first_to={{ plan.first_train.to_station }}&second_train_id={{ plan.second_train.train_id }}&second_from={{ plan.second_train.from_station }}&second_to={{ plan.second_train.to_station }}&date={{ selected_date }}&total_price={{ plan.total_price }}&min_seats={{ plan.min_seats }}" class="btn-booking" style="float: right;">预订</a>
+        </div>
+      </div>
+    </div>
+    <hr class="transfer-divider">  <!-- 横线分隔 -->
+    {% endfor %}
+  {% else %}
+    <p>未找到合适的换乘方案。</p>
+  {% endif %}
+</div>
+{% else %}
+  <div class="train-list">
   <h2><i class="fas fa-search"></i> 搜索结果：{{ from }} → {{ to }}</h2>
   {% if results %}
   <table>
@@ -85,6 +157,7 @@
   <p class="no-result"><i class="fas fa-snowflake"></i> 未找到符合条件的车次</p>
   {% endif %}
 </div>
+{% endif %}
 
 <!-- 文本框 -->
 <div class="snezhnaya-intro">
@@ -93,5 +166,21 @@
     焰羽谷段铁路因不可抗力停止运营，焰羽谷站暂不开放。
   </p>
 </div>
+
+<script>
+  document.getElementById('mode_toggle').addEventListener('click', function() {
+    const input = document.getElementById('mode_input');
+    const label = document.getElementById('mode_label');
+    if (input.value === 'transfer') {
+      input.value = 'direct';
+      label.textContent = '直达';
+      this.classList.remove('active');
+    } else {
+      input.value = 'transfer';
+      label.textContent = '换乘';
+      this.classList.add('active');
+    }
+  });
+</script>
 
 {% endblock %}
