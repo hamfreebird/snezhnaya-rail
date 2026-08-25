@@ -3520,3 +3520,26 @@ called `Result::unwrap()` on an `Err` value: ParseError(OutOfRange)
 [2026-08-26 07:20:05] [0;32m[INFO][0m 停止 tailscale funnel...
 [2026-08-26 07:20:05] [0;32m[INFO][0m 已重置 tailscale funnel
 [2026-08-26 07:20:05] [0;32m[INFO][0m 所有服务已停止。
+[2026-08-26 07:25:26] [0;32m[INFO][0m ========================================
+[2026-08-26 07:25:26] [0;32m[INFO][0m   至冬国铁路 服务管理脚本启动
+[2026-08-26 07:25:26] [0;32m[INFO][0m   项目目录: /home/user/freebird/WIND/snezhnaya-rail
+[2026-08-26 07:25:26] [0;32m[INFO][0m   日志文件: /home/user/freebird/WIND/snezhnaya-rail/server.log
+[2026-08-26 07:25:26] [0;32m[INFO][0m   重启间隔: 30 分钟
+[2026-08-26 07:25:26] [0;32m[INFO][0m   注意：仅重启 tailscale funnel，cargo 持续运行
+[2026-08-26 07:25:26] [0;32m[INFO][0m ========================================
+[2026-08-26 07:25:26] [0;32m[INFO][0m 正在禁用屏幕节能（xset）...
+[2026-08-26 07:25:26] [0;32m[INFO][0m 启动 cargo 服务...
+[2026-08-26 07:25:26] [0;32m[INFO][0m cargo 进程 PID: 1005436
+    Finished `release` profile [optimized] target(s) in 0.27s
+     Running `target/release/snezhnaya-rail`
+至冬国铁路已启动：http://localhost:3000
+[2026-08-26 07:25:31] [0;32m[INFO][0m 启动 tailscale funnel（后台模式）...
+[2026-08-26 07:25:31] [0;32m[INFO][0m tailscale funnel 启动成功（后台运行）
+[2026-08-26 07:25:31] [0;32m[INFO][0m 公网访问地址: https://archlinux.tail271cc7.ts.net
+[2026-08-26 07:25:31] [0;32m[INFO][0m 等待 30 分钟后执行下一次 funnel 重启...
+[2026-08-26 07:33:14] [0;32m[INFO][0m 捕获到退出信号，执行清理...
+[2026-08-26 07:33:14] [0;32m[INFO][0m 停止所有服务...
+[2026-08-26 07:33:14] [0;32m[INFO][0m 已终止 cargo 进程 (PID: 1005436)
+[2026-08-26 07:33:14] [0;32m[INFO][0m 停止 tailscale funnel...
+[2026-08-26 07:33:14] [0;32m[INFO][0m 已重置 tailscale funnel
+[2026-08-26 07:33:14] [0;32m[INFO][0m 所有服务已停止。

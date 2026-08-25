@@ -28,6 +28,7 @@
 - **UUID**：Uuid 1.x
 - **图像处理**：Image 0.24 + Imageproc 0.23 + QRCode 0.12 + ab_glyph 0.2
 - **限流**：Tower-Governor 0.8
+- **日志**：Tracing 0.1
 - **异步**：Tokio
 
 ### 前端

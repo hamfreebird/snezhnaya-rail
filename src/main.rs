@@ -23,7 +23,15 @@ use tera::{Context, Tera};
 use tokio::time;
 use tower_governor::{governor::GovernorConfigBuilder};
 use tower_http::services::ServeDir;
+use tower_http::trace::TraceLayer;
 use uuid::Uuid;
+use tracing::{info, error};
+use tracing_subscriber::{
+    layer::SubscriberExt, 
+    util::SubscriberInitExt, 
+    filter::EnvFilter
+};
+use tracing_appender::non_blocking::WorkerGuard;
 
 // ---------- 数据结构 ----------
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -342,6 +350,42 @@ fn generate_unique_order_id(orders: &HashMap<String, Order>) -> String {
             return id;
         }
     }
+}
+
+// 初始化日志系统，返回 _guard 用于保持日志写入器存活
+fn init_logging() -> WorkerGuard {
+    // 1. 日志级别（可通过环境变量 RUST_LOG 覆盖）
+    let env_filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new("info,snezhnaya_rail=debug"));
+
+    // 2. 控制台输出（漂亮格式）
+    let console_layer = tracing_subscriber::fmt::layer()
+        .with_writer(std::io::stdout)
+        .with_ansi(true)
+        .with_target(true)
+        .with_thread_names(true)
+        .with_level(true)
+        .pretty();
+
+    // 3. 文件输出（JSON 格式，按日轮转）
+    let file_appender = tracing_appender::rolling::daily("logs", "snezhnaya-rail.log");
+    let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
+    let file_layer = tracing_subscriber::fmt::layer()
+        .with_writer(non_blocking)
+        .with_ansi(false)
+        .with_target(true)
+        .with_level(true)
+        .json();  // 现在可以调用了
+
+    // 4. 注册
+    tracing_subscriber::registry()
+        .with(env_filter)
+        .with(console_layer)
+        .with(file_layer)
+        .init();
+
+    info!("日志系统初始化完成");
+    guard
 }
 
 fn save_order_index(index: &HashMap<String, Vec<String>>) {
@@ -689,7 +733,7 @@ fn reload_all(state: &Arc<AppState>) {
     *state.notifications.write().unwrap() = new_notifs;
     *state.train_mtime.write().unwrap() = get_mtime("trains.csv");
     *state.notif_mtime.write().unwrap() = get_mtime("notifications.txt");
-    println!("热重载完成");
+    info!("热重载完成");
 }
 
 // ---------- 车票生成辅助函数 ----------
@@ -712,7 +756,7 @@ fn load_font() -> FontArc {
     for path in font_paths.iter() {
         if let Ok(data) = fs::read(path) {
             if let Ok(font) = FontArc::try_from_vec(data) {
-                // println!("成功加载字体: {}", path);
+                // info!("成功加载字体: {}", path);
                 return font;
             }
         }
@@ -1977,10 +2021,12 @@ async fn transfer_confirm(
 // ---------- 主函数 ----------
 #[tokio::main]
 async fn main() {
+    let _guard = init_logging();
+
     let tera = match Tera::new("templates/**/*.html") {
         Ok(t) => t,
         Err(e) => {
-            eprintln!("Tera 解析模板目录失败: {}", e);
+            error!("Tera 解析模板目录失败: {}", e);
             return;
         }
     };
@@ -2032,7 +2078,7 @@ async fn main() {
                 }
             }
             if need_reload {
-                println!("检测到文件变更，执行热重载...");
+                info!("检测到文件变更，执行热重载...");
                 reload_all(&state_clone);
             }
         }
@@ -2072,11 +2118,12 @@ async fn main() {
         .route("/diagram", get(diagram_page))
         .route("/admin/reload", get(admin_reload))
         .nest_service("/static", ServeDir::new("static"))
+        .layer(TraceLayer::new_for_http())
         // .layer(GovernorLayer::new(governor_conf))
         .with_state(state);
 
     let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await.unwrap();
-    println!("至冬国铁路已启动：http://localhost:3000");
+    info!("至冬国铁路已启动：http://localhost:3000");
     axum::serve(
         listener,
         app.into_make_service_with_connect_info::<SocketAddr>(),

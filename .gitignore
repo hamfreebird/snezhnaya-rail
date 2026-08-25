@@ -1,4 +1,5 @@
 /target
+/logs
 order.json
 order_index.json
 run_server.sh

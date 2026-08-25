@@ -18,6 +18,9 @@ serde_json = "1.0.151"
 tera = "1.19"
 tokio = { version = "1.53.1", features = ["full"] }
 tower = "0.5.3"
-tower-http = { version = "0.7.0", features = ["fs", "trace"] }
+tower-http = { version = "0.7.0", features = ["fs", "trace", "compression-full"] }
 tower_governor = "0.8.0"
+tracing = "0.1.44"
+tracing-appender = "0.2.5"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter", "json", "fmt"] }
 uuid = { version = "1.24.0", features = ["v4"] }
