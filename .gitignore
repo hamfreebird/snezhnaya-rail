@@ -1,3 +1,4 @@
 /target
-/order.json
-/order_index.json
+order.json
+order_index.json
+run_server.sh
