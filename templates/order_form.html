@@ -48,6 +48,25 @@
       <input type="number" id="seat_count" name="seat_count" min="1" max="{{ min_seats }}" value="1" required>
     </div>
 
+    <div class="field-group" style="display:flex; gap:20px; flex-wrap:wrap;">
+      <div style="flex:1;">
+        <label for="carriage_index">车厢</label>
+        <select name="carriage_index" id="carriage_index" required>
+          <option value="">请选择</option>
+          {% for i in range(start=1, end=train.carriage_count + 1) %}
+          <option value="{{ i }}">{{ i }}车厢</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div style="flex:1;">
+        <label for="seat_category">坐席类别</label>
+        <select name="seat_category" id="seat_category" required>
+          <option value="corridor">靠走廊</option>
+          <option value="window">靠窗</option>
+        </select>
+      </div>
+    </div>
+
     <div class="form-actions">
       <button type="submit" class="btn-primary"><i class="fas fa-lock"></i> 提交占座</button>
       <a href="/" class="btn-secondary"><i class="fas fa-times"></i> 取消</a>

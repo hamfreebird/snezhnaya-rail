@@ -37,14 +37,35 @@
   </div>
 
   <!-- 改签模态框 -->
-  <div id="changeModal" style="display:none; position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.7); z-index:1000;">
+  <div id="changeModal" style="display:none; position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.7); z-index:9000;">
     <div style="background:#1a2238; max-width:750px; margin:50px auto; padding:30px; border-radius:10px; border:1px solid #2a4a6a; max-height:80vh; overflow-y:auto;">
       <h3>选择新车次</h3>
       <p>原订单总价：<strong>{{ order.price }} 摩拉</strong></p>
       <div id="availableTrains" style="margin-bottom:20px;">
         <p>加载中...</p>
       </div>
+
+      <!-- 新增车厢和类别选择 -->
+      <div id="seatSelection" style="display:none; margin-bottom:20px;">
+        <div class="field-group" style="display:flex; gap:20px; flex-wrap:wrap;">
+          <div style="flex:1;">
+            <label for="new_carriage">车厢</label>
+            <select name="new_carriage" id="new_carriage" required>
+              <option value="">请先选择车次</option>
+            </select>
+          </div>
+          <div style="flex:1;">
+            <label for="new_category">坐席类别</label>
+            <select name="new_category" id="new_category" required>
+              <option value="corridor">靠走廊</option>
+              <option value="window">靠窗</option>
+            </select>
+          </div>
+        </div>
+      </div>
+
       <div id="priceDiff" style="margin-bottom:15px; font-weight:bold;"></div>
+      <div id="changeError" style="color:#ff6b6b; margin-top:10px; text-align:center;"></div>
       <div class="form-actions">
         <button id="confirmChangeBtn" class="btn-primary" disabled>确认改签</button>
         <button type="button" onclick="document.getElementById('changeModal').style.display='none'" class="btn-secondary">取消</button>
@@ -60,13 +81,17 @@
 
     const originalPrice = {{ order.price }};
     let selectedPrice = 0;
+    let selectedTrainCarriageCount = 0;
+    let selectedTrainId = '';
 
     function loadAvailableTrains(orderId) {
       const container = document.getElementById('availableTrains');
       const diffDiv = document.getElementById('priceDiff');
+      const seatSelection = document.getElementById('seatSelection');
       diffDiv.textContent = '';
       container.innerHTML = '<p>加载中...</p>';
       document.getElementById('confirmChangeBtn').disabled = true;
+      seatSelection.style.display = 'none';
 
       fetch('/exchange/available?order_id=' + orderId)
         .then(res => {
@@ -83,7 +108,7 @@
           html += '<thead><tr><th>选择</th><th>车次</th><th>出发</th><th>到达</th><th>票价(摩拉)</th><th>余票</th></tr></thead><tbody>';
           data.forEach((item) => {
             html += `<tr>
-              <td><input type="radio" name="selected_train" value="${item.id}" data-price="${item.price}" data-seats="${item.seats}"></td>
+              <td><input type="radio" name="selected_train" value="${item.id}" data-price="${item.price}" data-seats="${item.seats}" data-carriage="${item.carriage_count}"></td>
               <td>${item.base_train_id} (${item.name})</td>
               <td>${item.departure}</td>
               <td>${item.arrival}</td>
@@ -99,9 +124,12 @@
           document.querySelectorAll('input[name="selected_train"]').forEach(radio => {
             radio.addEventListener('change', function() {
               const price = parseInt(this.dataset.price);
+              const carriageCount = parseInt(this.dataset.carriage);
               selectedPrice = price;
+              selectedTrainCarriageCount = carriageCount;
+              selectedTrainId = this.value;
               document.getElementById('confirmChangeBtn').disabled = false;
-              // 差价显示
+              // 显示差价
               const diff = price - originalPrice;
               if (diff > 0) {
                 diffDiv.textContent = `需补差价：${diff} 摩拉`;
@@ -112,6 +140,18 @@
               } else {
                 diffDiv.textContent = '价格相同，无需补差价';
                 diffDiv.style.color = '#f0ad4e';
+              }
+              // 显示座位选择区域
+              const seatSelection = document.getElementById('seatSelection');
+              seatSelection.style.display = 'block';
+              // 更新车厢下拉框
+              const carriageSelect = document.getElementById('new_carriage');
+              carriageSelect.innerHTML = '';
+              for (let i = 1; i <= carriageCount; i++) {
+                const option = document.createElement('option');
+                option.value = i;
+                option.textContent = `${i}车厢`;
+                carriageSelect.appendChild(option);
               }
             });
           });
@@ -129,6 +169,12 @@
         return;
       }
       const trainId = selected.value;
+      const carriage = document.getElementById('new_carriage').value;
+      const category = document.getElementById('new_category').value;
+      if (!carriage) {
+        alert('请选择车厢');
+        return;
+      }
       // 确认差价
       const diff = selectedPrice - originalPrice;
       if (diff > 0) {
@@ -140,18 +186,37 @@
           return;
         }
       }
-      const form = document.createElement('form');
-      form.method = 'post';
-      form.action = '/exchange/change';
-      form.innerHTML = `
-        <input type="hidden" name="order_id" value="{{ order.id }}">
-        <input type="hidden" name="new_train_id" value="${trainId}">
-        <input type="hidden" name="new_from" value="{{ order.from_station }}">
-        <input type="hidden" name="new_to" value="{{ order.to_station }}">
-        <input type="hidden" name="new_seat_count" value="{{ order.seat_count }}">
-      `;
-      document.body.appendChild(form);
-      form.submit();
+
+      // 构建 FormData
+      const formData = new FormData();
+      formData.append('order_id', '{{ order.id }}');
+      formData.append('new_train_id', trainId);
+      formData.append('new_from', '{{ order.from_station }}');
+      formData.append('new_to', '{{ order.to_station }}');
+      formData.append('new_seat_count', '{{ order.seat_count }}');
+      formData.append('new_carriage', carriage);
+      formData.append('new_category', category);
+      formData.append('_ajax', '1'); // 标记为 AJAX 请求
+
+      // 清空之前的错误
+      document.getElementById('changeError').textContent = '';
+
+      fetch('/exchange/change', {
+        method: 'POST',
+        body: formData
+      })
+      .then(res => res.json())
+      .then(data => {
+        if (data.success) {
+          window.location.href = '/orders?order_id=' + data.order_id;
+        } else {
+          document.getElementById('changeError').textContent = data.message || '改签失败，请重试';
+        }
+      })
+      .catch(err => {
+        document.getElementById('changeError').textContent = '网络错误，请稍后重试';
+        console.error(err);
+      });
     });
   </script>
   {% else %}
