@@ -4,7 +4,6 @@
 <div class="order-form-container">
   <h2><i class="fas fa-exchange-alt"></i> 填写换乘订单</h2>
 
-  <!-- 换乘信息卡片 -->
   <div class="transfer-summary-box">
     <div class="transfer-legs">
       <div class="transfer-leg">
@@ -39,7 +38,7 @@
     </div>
   </div>
 
-  <form action="/order/transfer" method="post" class="order-form">
+  <form action="/order/transfer" method="post" class="order-form" id="transferForm">
     <input type="hidden" name="first_train_id" value="{{ first_train_id }}">
     <input type="hidden" name="first_from" value="{{ first_from }}">
     <input type="hidden" name="first_to" value="{{ first_to }}">
@@ -74,10 +73,62 @@
         </select>
       </div>
     </div>
+
+    <div id="transferError" style="color:#ff6b6b; margin-top:10px; text-align:center;"></div>
+
     <div class="form-actions">
       <button type="submit" class="btn-primary"><i class="fas fa-lock"></i> 提交占座</button>
       <a href="/" class="btn-secondary"><i class="fas fa-times"></i> 取消</a>
     </div>
   </form>
 </div>
+
+<script>
+  document.getElementById('transferForm').addEventListener('submit', function(e) {
+    e.preventDefault();
+    const form = this;
+    const formData = new FormData(form);
+    formData.append('_ajax', '1');
+
+    const errorDiv = document.getElementById('transferError');
+    errorDiv.textContent = '';
+
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 10000); // 10秒超时
+
+    fetch('/order/transfer', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams(formData),
+      signal: controller.signal
+    })
+    .then(response => {
+      clearTimeout(timeoutId);
+      console.log('响应状态:', response.status);
+      return response.text();
+    })
+    .then(text => {
+      console.log('原始响应:', text);
+      let data;
+      try {
+        data = JSON.parse(text);
+      } catch (e) {
+        throw new Error('响应不是有效 JSON: ' + text);
+      }
+      if (data.success && data.redirect) {
+        window.location.href = data.redirect;
+      } else {
+        errorDiv.textContent = data.message || '占座失败，请重试';
+      }
+    })
+    .catch(err => {
+      if (err.name === 'AbortError') {
+        errorDiv.textContent = '请求超时，请重试';
+      } else {
+        console.error('换乘错误:', err);
+        errorDiv.textContent = err.message || '网络错误，请稍后重试';
+      }
+    });
+  });
+</script>
 {% endblock %}

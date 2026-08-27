@@ -203,7 +203,8 @@
 
       fetch('/exchange/change', {
         method: 'POST',
-        body: formData
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams(formData)
       })
       .then(res => res.json())
       .then(data => {

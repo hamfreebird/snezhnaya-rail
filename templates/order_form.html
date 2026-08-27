@@ -27,7 +27,7 @@
     </div>
   </div>
 
-  <form action="/order/create" method="post" class="order-form">
+  <form action="/order/create" method="post" class="order-form" id="orderForm">
     <input type="hidden" name="train_id" value="{{ train.id }}">
     <input type="hidden" name="from" value="{{ from }}">
     <input type="hidden" name="to" value="{{ to }}">
@@ -67,10 +67,62 @@
       </div>
     </div>
 
+    <div id="orderError" style="color:#ff6b6b; margin-top:10px; text-align:center;"></div>
+
     <div class="form-actions">
       <button type="submit" class="btn-primary"><i class="fas fa-lock"></i> 提交占座</button>
       <a href="/" class="btn-secondary"><i class="fas fa-times"></i> 取消</a>
     </div>
   </form>
 </div>
+
+<script>
+  document.getElementById('orderForm').addEventListener('submit', function(e) {
+    e.preventDefault();
+    const form = this;
+    const formData = new FormData(form);
+    formData.append('_ajax', '1');
+
+    const errorDiv = document.getElementById('orderError');
+    errorDiv.textContent = '';
+
+    fetch('/order/create', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams(formData)
+    })
+    .then(async res => {
+      const contentType = res.headers.get('content-type') || '';
+      if (!contentType.includes('application/json')) {
+        const text = await res.text();
+        console.error('非JSON响应:', text);
+        throw new Error('服务器响应异常，请稍后重试');
+      }
+      const data = await res.json();
+      console.log('后端返回数据:', data);  // 调试日志
+      if (!res.ok) {
+        throw new Error(data.message || '请求失败');
+      }
+      return data;
+    })
+    .then(data => {
+      console.log('进入 then，data:', data);
+      if (data.success && data.redirect) {
+        console.log('准备跳转到:', data.redirect);
+        // 使用 replace 避免历史记录干扰
+        window.location.replace(data.redirect);
+        // 保险起见，设置超时重试
+        setTimeout(() => {
+          window.location.href = data.redirect;
+        }, 100);
+      } else {
+        errorDiv.textContent = data.message || '占座失败，请重试';
+      }
+    })
+    .catch(err => {
+      console.error('捕获错误:', err);
+      errorDiv.textContent = err.message || '网络错误，请稍后重试';
+    });
+  });
+</script>
 {% endblock %}
