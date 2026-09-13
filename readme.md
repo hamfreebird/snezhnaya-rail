@@ -28,7 +28,8 @@
 - **UUID**：Uuid 1.x
 - **图像处理**：Image 0.24 + Imageproc 0.23 + QRCode 0.12 + ab_glyph 0.2
 - **限流**：Tower-Governor 0.8
-- **日志**：Tracing 0.1
+- **日志**：Tracing 0.1 + Tracing Appender 0.2
+- **配置管理**：Config 0.14
 - **异步运行时**：Tokio
 
 ### 前端
@@ -43,13 +44,17 @@
 snezhnaya-rail/
 ├── Cargo.toml                  # 项目依赖
 ├── README.md
+├── config.toml                 # 外部配置（可选，不存在则使用默认值）
 ├── trains.csv                  # 车次数据（核心）
 ├── notifications.txt           # 通知内容
 ├── orders.json                 # 订单持久化（自动生成）
 ├── order_index.json            # 订单索引（自动生成）
+├── sold_counts.json            # 已售座位持久化（自动生成）
 ├── src/
 │   ├── main.rs                 # 入口文件
+│   ├── config.rs               # 配置结构体与加载逻辑
 │   ├── state.rs                # 应用状态（AppState）
+│   ├── cleanup.rs              # 订单超时清理任务
 │   ├── seats.rs                # 座位分配与释放
 │   ├── ticket.rs               # 车票生成（图片）
 │   ├── transfer.rs             # 换乘算法
@@ -119,6 +124,9 @@ snezhnaya-rail/
 - **改签/退签**：支持改签（自动计算差价）、退签（释放余票），并同步更新座位和订单索引。
 - **纸质车票**：生成蓝白渐变背景的 PNG 图片，包含二维码、座位号、乘车信息等。
 - **限流保护**：基于 IP 的请求频率限制（每秒 10 次，突发 30 次）。
+- **订单超时自动清理**：后台任务定期扫描过期未支付订单，自动取消并释放座位，避免座位泄漏。
+- **原子持久化与自愈**：座位分配与订单保存在同一临界区完成，失败自动回滚；启动时从 sold_counts.json 恢复已售座位，保证数据一致性。
+- **配置外部化**：所有路径、超时、业务规则、安全参数均可通过 config.toml 或环境变量（SNEZ_前缀）调整，无需重新编译。
 - **热重载**：每 30 秒自动检测 `trains.csv` 和 `notifications.txt` 变更并重新加载。
 - **日志记录**：使用 `tracing` 记录控制台和文件日志（按日轮转）。
 
@@ -135,6 +143,7 @@ cd snezhnaya-rail
 ### 2. 准备数据
 - 编辑 `trains.csv` 按示例格式填写车次数据（12 列，见项目根目录示例）。
 - 编辑 `notifications.txt` 添加通知（每两行为一组：标题 + 内容）。
+- 编辑 `config.toml` 修改配置（可选）。
 
 ### 3. 安装 Rust
 确保已安装 [Rust](https://rustup.rs/)。
@@ -143,7 +152,7 @@ cd snezhnaya-rail
 ```bash
 cargo run
 ```
-服务启动后访问 `http://localhost:3000`。
+服务启动后访问 `http://localhost:3000`。若使用了自定义的端口配置则替换为你自定义的端口号。
 
 ---
 

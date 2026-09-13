@@ -34,7 +34,8 @@ pub async fn search(
     let to = params.to.trim();
 
     if mode == "transfer" {
-        let plans = find_transfers(&trains, from, to, &base_date, 8);
+        let min_transfer = crate::config::get().timeouts.min_transfer_minutes;
+        let plans = find_transfers(&trains, from, to, &base_date, min_transfer);
         let mut ctx = Context::new();
         ctx.insert("page_title", "中转换乘方案 - 至冬国铁路");
         ctx.insert("plans", &plans);

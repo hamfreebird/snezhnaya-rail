@@ -1,32 +1,9 @@
 use crate::models::{Order, Train};
-use ab_glyph::{FontArc, PxScale};
+use ab_glyph::PxScale;
 use image::{ImageFormat, Rgb, RgbImage};
 use imageproc::drawing::draw_text_mut;
 use qrcode::QrCode;
-use tracing::{debug, info};
-
-pub fn load_font() -> FontArc {
-    let font_paths = [
-        "C:/Windows/Fonts/simhei.ttf",
-        "C:/Windows/Fonts/msyh.ttc",
-        "C:/Windows/Fonts/yahei.ttf",
-        "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
-        "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-        "/System/Library/Fonts/PingFang.ttc",
-        "/System/Library/Fonts/STHeiti Light.ttc",
-        "static/fonts/msyh.ttf",
-    ];
-    for path in font_paths.iter() {
-        if let Ok(data) = std::fs::read(path) {
-            if let Ok(font) = FontArc::try_from_vec(data) {
-                debug!("成功加载字体: {}", path);
-                return font;
-            }
-        }
-    }
-    panic!("未找到任何可用字体！当前搜索路径: {:?}", font_paths);
-}
+use tracing::debug;
 
 pub fn generate_ticket_image(order: &Order, seat_number: &str, train: &Train) -> Vec<u8> {
 
@@ -46,7 +23,7 @@ pub fn generate_ticket_image(order: &Order, seat_number: &str, train: &Train) ->
         }
     }
 
-    let font = load_font();
+    let font = crate::utils::fonts::load_font();
     let red = Rgb([255, 0, 0]);
     let dark_blue = Rgb([0, 0, 128]);
     let black = Rgb([0, 0, 0]);

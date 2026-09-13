@@ -3,4 +3,5 @@
 orders.json
 order_index.json
 run_server.sh
+sold_counts.json
 server.log

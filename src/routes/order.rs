@@ -1,3 +1,4 @@
+// src/routes/order.rs
 use axum::{
     extract::{State, Path, Query},
     response::{Html, IntoResponse, Redirect, Response, Json},
@@ -6,19 +7,18 @@ use axum::{
 };
 use tera::Context;
 use chrono::{Local, NaiveDate, Duration, Utc};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
-use tracing::info;
+use tracing::{info, error};
 use serde_json::json;
 
 use crate::state::SharedState;
 use crate::db::csv_loader::refresh_trains_with_date;
-use crate::db::order_store::save_orders;
+use crate::db::order_store::{save_orders, save_sold_counts};
 use crate::seats::allocate_seats_for_interval;
 use crate::utils::helpers::{find_interval, generate_unique_order_id};
 use crate::models::{Order, OrderStatus};
 
-// ---------- 表单结构体 ----------
 #[derive(Debug, serde::Deserialize)]
 pub struct CreateOrderForm {
     pub train_id: String,
@@ -50,7 +50,15 @@ pub struct TransferOrderForm {
     pub _ajax: Option<String>,
 }
 
-// ---------- 路由函数 ----------
+fn err_response(is_ajax: bool, msg: &str, code: StatusCode) -> Response {
+    let body = msg.to_string();
+    if is_ajax {
+        (code, Json(json!({ "success": false, "message": body }))).into_response()
+    } else {
+        (code, body).into_response()
+    }
+}
+
 pub async fn order_form(
     State(state): State<SharedState>,
     Path(train_id): Path<String>,
@@ -62,7 +70,8 @@ pub async fn order_form(
         .get("date")
         .cloned()
         .unwrap_or_else(|| Local::now().format("%Y-%m-%d").to_string());
-    let base_date = NaiveDate::parse_from_str(&date_str, "%Y-%m-%d").unwrap_or(Local::now().date_naive());
+    let base_date = NaiveDate::parse_from_str(&date_str, "%Y-%m-%d")
+        .unwrap_or(Local::now().date_naive());
     refresh_trains_with_date(&state, &base_date).await;
 
     if from.is_empty() || to.is_empty() {
@@ -112,38 +121,24 @@ pub async fn create_order(
     refresh_trains_with_date(&state, &base_date).await;
 
     let mut trains = state.trains.write().await;
-    let train = trains.iter_mut().find(|t| t.id == form.train_id);
-    let train = match train {
-        Some(t) => t,
-        None => {
-            return if is_ajax {
-                (StatusCode::BAD_REQUEST, Json(json!({ "success": false, "message": "车次不存在" }))).into_response()
-            } else {
-                (StatusCode::BAD_REQUEST, "车次不存在").into_response()
-            };
-        }
+    let mut sold_counts = state.sold_counts.write().await;
+    let mut orders = state.orders.write().await;
+
+    let train_idx = match trains.iter().position(|t| t.id == form.train_id) {
+        Some(i) => i,
+        None => return err_response(is_ajax, "车次不存在", StatusCode::BAD_REQUEST),
     };
-    if !train.is_selling {
-        return if is_ajax {
-            (StatusCode::BAD_REQUEST, Json(json!({ "success": false, "message": "该车次已停止售票" }))).into_response()
-        } else {
-            (StatusCode::BAD_REQUEST, "该车次已停止售票").into_response()
-        };
+    if !trains[train_idx].is_selling {
+        return err_response(is_ajax, "该车次已停止售票", StatusCode::BAD_REQUEST);
     }
 
-    let (fi, ti) = match find_interval(train, &form.from, &form.to) {
+    let (fi, ti) = match find_interval(&trains[train_idx], &form.from, &form.to) {
         Some((f, t)) => (f, t),
-        None => {
-            return if is_ajax {
-                (StatusCode::BAD_REQUEST, Json(json!({ "success": false, "message": "无效的站点区间" }))).into_response()
-            } else {
-                (StatusCode::BAD_REQUEST, "无效的站点区间").into_response()
-            };
-        }
+        None => return err_response(is_ajax, "无效的站点区间", StatusCode::BAD_REQUEST),
     };
 
     let assigned = match allocate_seats_for_interval(
-        train,
+        &mut trains[train_idx],
         fi,
         ti,
         form.carriage_index,
@@ -151,64 +146,94 @@ pub async fn create_order(
         form.seat_count,
     ) {
         Some(seats) => seats,
-        None => {
-            return if is_ajax {
-                (StatusCode::BAD_REQUEST, Json(json!({ "success": false, "message": "该类坐席余票不足" }))).into_response()
-            } else {
-                (StatusCode::BAD_REQUEST, "该类坐席余票不足").into_response()
-            };
-        }
+        None => return err_response(is_ajax, "该类坐席余票不足", StatusCode::BAD_REQUEST),
     };
 
-    let mut sold_counts = state.sold_counts.write().await;
     for i in fi..ti {
         let key = (form.train_id.clone(), i);
-        let set = sold_counts.entry(key).or_insert_with(std::collections::HashSet::new);
+        let set = sold_counts.entry(key).or_insert_with(HashSet::new);
         for &s in &assigned {
             set.insert(s);
         }
     }
-    drop(sold_counts);
 
-    let orders_map = state.orders.read().await;
-    let order_id = generate_unique_order_id(&orders_map);
-    drop(orders_map);
+    let order_id = generate_unique_order_id(&orders);
+    let expire_minutes = crate::config::get().timeouts.order_expire_minutes;
+    let expire_at = Utc::now() + Duration::minutes(expire_minutes);
 
-    let passenger_name_clone = form.passenger_name.clone();
-    let expire_at = Utc::now() + Duration::minutes(30);
     let order = Order {
         id: order_id.clone(),
-        train_id: form.train_id,
-        from_station: form.from,
-        to_station: form.to,
-        from_platform: form.from_platform,
-        passenger_name: form.passenger_name,
+        train_id: form.train_id.clone(),
+        from_station: form.from.clone(),
+        to_station: form.to.clone(),
+        from_platform: form.from_platform.clone(),
+        passenger_name: form.passenger_name.clone(),
         seat_count: form.seat_count,
         price: form.total_price * form.seat_count,
         status: OrderStatus::Pending,
         expire_at: expire_at.timestamp(),
         created_at: Utc::now().timestamp(),
         pay_time: None,
-        travel_date: form.date,
+        travel_date: form.date.clone(),
         group_id: None,
-        seat_numbers: assigned,
-        seat_category: form.seat_category,
+        seat_numbers: assigned.clone(),
+        seat_category: form.seat_category.clone(),
         carriage_index: form.carriage_index,
     };
 
-    let mut orders = state.orders.write().await;
     orders.insert(order_id.clone(), order);
-    let orders_clone = orders.clone();
-    drop(orders);
-    tokio::task::spawn_blocking(move || {
-        save_orders(&orders_clone);
-    });
 
-    info!("订单创建成功: {}，用户: {}", order_id, passenger_name_clone);
+    let save_ok = match save_orders(&orders) {
+        Ok(_) => match save_sold_counts(&sold_counts) {
+            Ok(_) => true,
+            Err(e) => {
+                error!("保存已售座位失败: {}", e);
+                false
+            }
+        },
+        Err(e) => {
+            error!("保存订单失败: {}", e);
+            false
+        }
+    };
+
+    if !save_ok {
+        orders.remove(&order_id);
+        for i in fi..ti {
+            let key = (form.train_id.clone(), i);
+            if let Some(set) = sold_counts.get_mut(&key) {
+                for &s in &assigned {
+                    set.remove(&s);
+                }
+            }
+            for &s in &assigned {
+                trains[train_idx].available_seats[i].push(s);
+            }
+            trains[train_idx].available_seats[i].sort();
+            trains[train_idx].available_seats[i].dedup();
+        }
+        trains[train_idx].seats = crate::db::csv_loader::compute_interval_seats_with_date(
+            &trains[train_idx],
+            &sold_counts,
+            &base_date,
+        );
+        return err_response(
+            is_ajax,
+            "保存订单失败，请重试",
+            StatusCode::INTERNAL_SERVER_ERROR,
+        );
+    }
+
+    info!("订单创建成功: {}，用户: {}", order_id, form.passenger_name);
 
     if is_ajax {
-        let redirect_url = format!("/order_success?order_id={}&expire_at={}", order_id, expire_at.timestamp());
-        (StatusCode::OK, Json(json!({ "success": true, "redirect": redirect_url }))).into_response()
+        let redirect_url = format!(
+            "/order_success?order_id={}&expire_at={}",
+            order_id,
+            expire_at.timestamp()
+        );
+        (StatusCode::OK, Json(json!({ "success": true, "redirect": redirect_url })))
+            .into_response()
     } else {
         let mut ctx = Context::new();
         ctx.insert("page_title", "占座成功 - 至冬国铁路");
@@ -230,229 +255,222 @@ pub async fn order_transfer(
 
     info!("进入 order_transfer，is_ajax={}", is_ajax);
 
-    // 第一阶段：分配座位（在锁内）
-    let (group_id, order1_id, order2_id) = {
-        let mut trains = state.trains.write().await;
-        let mut sold_counts = state.sold_counts.write().await;
-        let mut orders = state.orders.write().await;
+    let mut trains = state.trains.write().await;
+    let mut sold_counts = state.sold_counts.write().await;
+    let mut orders = state.orders.write().await;
 
-        info!("已获取 trains, sold_counts, orders 写锁");
-
-        let train1_idx = match trains.iter().position(|t| t.id == form.first_train_id) {
-            Some(idx) => idx,
-            None => {
-                return if is_ajax {
-                    (StatusCode::BAD_REQUEST, Json(json!({ "success": false, "message": "第一段车次不存在" }))).into_response()
-                } else {
-                    (StatusCode::BAD_REQUEST, "第一段车次不存在").into_response()
-                };
-            }
-        };
-        let train2_idx = match trains.iter().position(|t| t.id == form.second_train_id) {
-            Some(idx) => idx,
-            None => {
-                return if is_ajax {
-                    (StatusCode::BAD_REQUEST, Json(json!({ "success": false, "message": "第二段车次不存在" }))).into_response()
-                } else {
-                    (StatusCode::BAD_REQUEST, "第二段车次不存在").into_response()
-                };
-            }
-        };
-
-        info!("找到两个车次索引");
-
-        // 第一段
-        let (fi1, _ti1, price1, assigned1) = {
-            let train1 = &mut trains[train1_idx];
-            if !train1.is_selling {
-                return if is_ajax {
-                    (StatusCode::BAD_REQUEST, Json(json!({ "success": false, "message": "第一段车次已停止售票" }))).into_response()
-                } else {
-                    (StatusCode::BAD_REQUEST, "第一段车次已停止售票").into_response()
-                };
-            }
-            let (fi, ti) = match find_interval(train1, &form.first_from, &form.first_to) {
-                Some((f, t)) => (f, t),
-                None => {
-                    return if is_ajax {
-                        (StatusCode::BAD_REQUEST, Json(json!({ "success": false, "message": "第一段无效区间" }))).into_response()
-                    } else {
-                        (StatusCode::BAD_REQUEST, "第一段无效区间").into_response()
-                    };
-                }
-            };
-            let assigned = match allocate_seats_for_interval(
-                train1,
-                fi,
-                ti,
-                form.carriage_index,
-                &form.seat_category,
-                form.seat_count,
-            ) {
-                Some(seats) => seats,
-                None => {
-                    return if is_ajax {
-                        (StatusCode::BAD_REQUEST, Json(json!({ "success": false, "message": "第一段该类坐席余票不足" }))).into_response()
-                    } else {
-                        (StatusCode::BAD_REQUEST, "第一段该类坐席余票不足").into_response()
-                    };
-                }
-            };
-            for i in fi..ti {
-                let key = (form.first_train_id.clone(), i);
-                let set = sold_counts.entry(key).or_insert_with(std::collections::HashSet::new);
-                for &s in &assigned {
-                    set.insert(s);
-                }
-            }
-            let price: u32 = train1.prices[fi..ti].iter().sum();
-            info!("第一段分配完成，座位: {:?}", assigned);
-            (fi, ti, price, assigned)
-        };
-
-        // 第二段
-        let (fi2, _ti2, price2, assigned2) = {
-            let train2 = &mut trains[train2_idx];
-            if !train2.is_selling {
-                return if is_ajax {
-                    (StatusCode::BAD_REQUEST, Json(json!({ "success": false, "message": "第二段车次已停止售票" }))).into_response()
-                } else {
-                    (StatusCode::BAD_REQUEST, "第二段车次已停止售票").into_response()
-                };
-            }
-            let (fi, ti) = match find_interval(train2, &form.second_from, &form.second_to) {
-                Some((f, t)) => (f, t),
-                None => {
-                    return if is_ajax {
-                        (StatusCode::BAD_REQUEST, Json(json!({ "success": false, "message": "第二段无效区间" }))).into_response()
-                    } else {
-                        (StatusCode::BAD_REQUEST, "第二段无效区间").into_response()
-                    };
-                }
-            };
-            let assigned = match allocate_seats_for_interval(
-                train2,
-                fi,
-                ti,
-                form.carriage_index,
-                &form.seat_category,
-                form.seat_count,
-            ) {
-                Some(seats) => seats,
-                None => {
-                    let mut trains_ref = trains;
-                    crate::seats::release_seats(
-                        &form.first_train_id,
-                        &form.first_from,
-                        &form.first_to,
-                        &assigned1,
-                        &mut trains_ref,
-                        &mut sold_counts,
-                    );
-                    return if is_ajax {
-                        (StatusCode::BAD_REQUEST, Json(json!({ "success": false, "message": "第二段该类坐席余票不足" }))).into_response()
-                    } else {
-                        (StatusCode::BAD_REQUEST, "第二段该类坐席余票不足").into_response()
-                    };
-                }
-            };
-            for i in fi..ti {
-                let key = (form.second_train_id.clone(), i);
-                let set = sold_counts.entry(key).or_insert_with(std::collections::HashSet::new);
-                for &s in &assigned {
-                    set.insert(s);
-                }
-            }
-            let price: u32 = train2.prices[fi..ti].iter().sum();
-            info!("第二段分配完成，座位: {:?}", assigned);
-            (fi, ti, price, assigned)
-        };
-
-        let total_price1 = price1 * form.seat_count;
-        let total_price2 = price2 * form.seat_count;
-
-        let group_id = Uuid::new_v4().to_string();
-        let expire_at = Utc::now() + Duration::minutes(30);
-
-        info!("生成订单号...");
-        let order1_id = generate_unique_order_id(&orders);
-        let order2_id = generate_unique_order_id(&orders);
-        info!("订单号生成完成: {}, {}", order1_id, order2_id);
-
-        let order1 = Order {
-            id: order1_id.clone(),
-            train_id: form.first_train_id,
-            from_station: form.first_from.clone(),
-            to_station: form.first_to.clone(),
-            from_platform: {
-                let train1 = &trains[train1_idx];
-                train1.platforms[fi1].clone()
-            },
-            passenger_name: form.passenger_name.clone(),
-            seat_count: form.seat_count,
-            price: total_price1,
-            status: OrderStatus::Pending,
-            expire_at: expire_at.timestamp(),
-            created_at: Utc::now().timestamp(),
-            pay_time: None,
-            travel_date: form.date.clone(),
-            group_id: Some(group_id.clone()),
-            seat_numbers: assigned1,
-            seat_category: form.seat_category.clone(),
-            carriage_index: form.carriage_index,
-        };
-        let order2 = Order {
-            id: order2_id.clone(),
-            train_id: form.second_train_id,
-            from_station: form.second_from.clone(),
-            to_station: form.second_to.clone(),
-            from_platform: {
-                let train2 = &trains[train2_idx];
-                train2.platforms[fi2].clone()
-            },
-            passenger_name: form.passenger_name.clone(),
-            seat_count: form.seat_count,
-            price: total_price2,
-            status: OrderStatus::Pending,
-            expire_at: expire_at.timestamp(),
-            created_at: Utc::now().timestamp(),
-            pay_time: None,
-            travel_date: form.date.clone(),
-            group_id: Some(group_id.clone()),
-            seat_numbers: assigned2,
-            seat_category: form.seat_category.clone(),
-            carriage_index: form.carriage_index,
-        };
-
-        info!("插入订单...");
-        orders.insert(order1_id.clone(), order1);
-        orders.insert(order2_id.clone(), order2);
-        info!("订单插入完成");
-
-        // 克隆 orders 并释放锁
-        let orders_clone = orders.clone();
-        drop(orders);
-        drop(sold_counts);
-        drop(trains);
-        info!("锁已释放");
-
-        // 异步保存订单
-        tokio::task::spawn_blocking(move || {
-            save_orders(&orders_clone);
-            info!("订单已异步保存");
-        });
-
-        info!("换乘订单创建成功，group_id: {}", group_id);
-        (group_id, order1_id, order2_id)
+    let train1_idx = match trains.iter().position(|t| t.id == form.first_train_id) {
+        Some(i) => i,
+        None => return err_response(is_ajax, "第一段车次不存在", StatusCode::BAD_REQUEST),
     };
+    let train2_idx = match trains.iter().position(|t| t.id == form.second_train_id) {
+        Some(i) => i,
+        None => return err_response(is_ajax, "第二段车次不存在", StatusCode::BAD_REQUEST),
+    };
+
+    if !trains[train1_idx].is_selling {
+        return err_response(is_ajax, "第一段车次已停止售票", StatusCode::BAD_REQUEST);
+    }
+    let (fi1, ti1) = match find_interval(&trains[train1_idx], &form.first_from, &form.first_to) {
+        Some(x) => x,
+        None => return err_response(is_ajax, "第一段无效区间", StatusCode::BAD_REQUEST),
+    };
+
+    let assigned1 = match allocate_seats_for_interval(
+        &mut trains[train1_idx],
+        fi1,
+        ti1,
+        form.carriage_index,
+        &form.seat_category,
+        form.seat_count,
+    ) {
+        Some(s) => s,
+        None => return err_response(is_ajax, "第一段该类坐席余票不足", StatusCode::BAD_REQUEST),
+    };
+    for i in fi1..ti1 {
+        let key = (form.first_train_id.clone(), i);
+        let set = sold_counts.entry(key).or_insert_with(HashSet::new);
+        for &s in &assigned1 {
+            set.insert(s);
+        }
+    }
+    let price1: u32 = trains[train1_idx].prices[fi1..ti1].iter().sum();
+
+    if !trains[train2_idx].is_selling {
+        rollback_seats(
+            &mut trains[train1_idx],
+            &mut sold_counts,
+            &form.first_train_id,
+            fi1,
+            ti1,
+            &assigned1,
+        );
+        return err_response(is_ajax, "第二段车次已停止售票", StatusCode::BAD_REQUEST);
+    }
+    let (fi2, ti2) = match find_interval(&trains[train2_idx], &form.second_from, &form.second_to) {
+        Some(x) => x,
+        None => {
+            rollback_seats(
+                &mut trains[train1_idx],
+                &mut sold_counts,
+                &form.first_train_id,
+                fi1,
+                ti1,
+                &assigned1,
+            );
+            return err_response(is_ajax, "第二段无效区间", StatusCode::BAD_REQUEST);
+        }
+    };
+
+    let assigned2 = match allocate_seats_for_interval(
+        &mut trains[train2_idx],
+        fi2,
+        ti2,
+        form.carriage_index,
+        &form.seat_category,
+        form.seat_count,
+    ) {
+        Some(s) => s,
+        None => {
+            rollback_seats(
+                &mut trains[train1_idx],
+                &mut sold_counts,
+                &form.first_train_id,
+                fi1,
+                ti1,
+                &assigned1,
+            );
+            return err_response(is_ajax, "第二段该类坐席余票不足", StatusCode::BAD_REQUEST);
+        }
+    };
+    for i in fi2..ti2 {
+        let key = (form.second_train_id.clone(), i);
+        let set = sold_counts.entry(key).or_insert_with(HashSet::new);
+        for &s in &assigned2 {
+            set.insert(s);
+        }
+    }
+    let price2: u32 = trains[train2_idx].prices[fi2..ti2].iter().sum();
+
+    let group_id = Uuid::new_v4().to_string();
+    let expire_minutes = crate::config::get().timeouts.order_expire_minutes;
+    let expire_at = Utc::now() + Duration::minutes(expire_minutes);
+    let order1_id = generate_unique_order_id(&orders);
+    let order2_id = generate_unique_order_id(&orders);
+
+    let order1 = Order {
+        id: order1_id.clone(),
+        train_id: form.first_train_id.clone(),
+        from_station: form.first_from.clone(),
+        to_station: form.first_to.clone(),
+        from_platform: trains[train1_idx].platforms[fi1].clone(),
+        passenger_name: form.passenger_name.clone(),
+        seat_count: form.seat_count,
+        price: price1 * form.seat_count,
+        status: OrderStatus::Pending,
+        expire_at: expire_at.timestamp(),
+        created_at: Utc::now().timestamp(),
+        pay_time: None,
+        travel_date: form.date.clone(),
+        group_id: Some(group_id.clone()),
+        seat_numbers: assigned1.clone(),
+        seat_category: form.seat_category.clone(),
+        carriage_index: form.carriage_index,
+    };
+    let order2 = Order {
+        id: order2_id.clone(),
+        train_id: form.second_train_id.clone(),
+        from_station: form.second_from.clone(),
+        to_station: form.second_to.clone(),
+        from_platform: trains[train2_idx].platforms[fi2].clone(),
+        passenger_name: form.passenger_name.clone(),
+        seat_count: form.seat_count,
+        price: price2 * form.seat_count,
+        status: OrderStatus::Pending,
+        expire_at: expire_at.timestamp(),
+        created_at: Utc::now().timestamp(),
+        pay_time: None,
+        travel_date: form.date.clone(),
+        group_id: Some(group_id.clone()),
+        seat_numbers: assigned2.clone(),
+        seat_category: form.seat_category.clone(),
+        carriage_index: form.carriage_index,
+    };
+
+    orders.insert(order1_id.clone(), order1);
+    orders.insert(order2_id.clone(), order2);
+
+    let save_ok = match save_orders(&orders) {
+        Ok(_) => match save_sold_counts(&sold_counts) {
+            Ok(_) => true,
+            Err(e) => {
+                error!("保存已售座位失败: {}", e);
+                false
+            }
+        },
+        Err(e) => {
+            error!("保存订单失败: {}", e);
+            false
+        }
+    };
+
+    if !save_ok {
+        orders.remove(&order1_id);
+        orders.remove(&order2_id);
+        rollback_seats(
+            &mut trains[train1_idx],
+            &mut sold_counts,
+            &form.first_train_id,
+            fi1,
+            ti1,
+            &assigned1,
+        );
+        rollback_seats(
+            &mut trains[train2_idx],
+            &mut sold_counts,
+            &form.second_train_id,
+            fi2,
+            ti2,
+            &assigned2,
+        );
+        return err_response(
+            is_ajax,
+            "保存订单失败，请重试",
+            StatusCode::INTERNAL_SERVER_ERROR,
+        );
+    }
+
+    info!("换乘订单创建成功，group_id: {}", group_id);
 
     if is_ajax {
         let redirect_url = format!("/transfer_confirm?group_id={}", group_id);
-        info!("返回 AJAX 响应，重定向到: {}", redirect_url);
-        (StatusCode::OK, Json(json!({ "success": true, "redirect": redirect_url }))).into_response()
+        (StatusCode::OK, Json(json!({ "success": true, "redirect": redirect_url })))
+            .into_response()
     } else {
-        info!("返回重定向到 transfer_confirm");
         Redirect::to(&format!("/transfer_confirm?group_id={}", group_id)).into_response()
+    }
+}
+
+fn rollback_seats(
+    train: &mut crate::models::Train,
+    sold_counts: &mut HashMap<(String, usize), HashSet<u32>>,
+    train_id: &str,
+    fi: usize,
+    ti: usize,
+    assigned: &[u32],
+) {
+    for i in fi..ti {
+        let key = (train_id.to_string(), i);
+        if let Some(set) = sold_counts.get_mut(&key) {
+            for &s in assigned {
+                set.remove(&s);
+            }
+        }
+        for &s in assigned {
+            train.available_seats[i].push(s);
+        }
+        train.available_seats[i].sort();
+        train.available_seats[i].dedup();
     }
 }
 
@@ -502,7 +520,10 @@ pub async fn order_success_page(
     Query(params): Query<HashMap<String, String>>,
 ) -> Response {
     let order_id = params.get("order_id").cloned().unwrap_or_default();
-    let expire_at = params.get("expire_at").cloned().unwrap_or_else(|| "0".to_string());
+    let expire_at = params
+        .get("expire_at")
+        .cloned()
+        .unwrap_or_else(|| "0".to_string());
     if order_id.is_empty() {
         return (StatusCode::BAD_REQUEST, "缺少订单号").into_response();
     }

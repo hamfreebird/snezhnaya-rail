@@ -1,0 +1,62 @@
+# config.toml —— 至冬国铁路配置
+# 所有字段均可省略，省略时使用代码内默认值。
+# 环境变量覆盖前缀为 SNEZ_，层级用双下划线 __ 分隔。
+# 例如：SNEZ_SERVER__PORT=8080 会覆盖 server.port。
+
+[server]
+host = "0.0.0.0"
+port = 3000
+template_dir = "templates/**/*.html"
+static_dir = "static"
+static_url_prefix = "/static"
+
+[paths]
+trains_csv = "trains.csv"
+notifications_txt = "notifications.txt"
+orders_json = "orders.json"
+order_index_json = "order_index.json"
+sold_counts_json = "sold_counts.json"
+log_dir = "logs"
+font_paths = [
+    "C:/Windows/Fonts/simhei.ttf",
+    "C:/Windows/Fonts/msyh.ttc",
+    "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
+    "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
+    "static/fonts/msyh.ttf",
+]
+
+[timeouts]
+order_expire_minutes = 30
+cleanup_interval_seconds = 30
+hot_reload_interval_seconds = 30
+min_transfer_minutes = 8
+stop_selling_before_departure_minutes = 30
+near_departure_window_minutes = 120
+
+[business]
+presale_days = 7
+max_transfer_plans = 50
+seats_per_carriage_default = 40
+seats_per_carriage_zhite = 35
+
+[business.discount_factors]
+today_default = 0.15
+near_departure_min = 0.0
+day_1 = 0.2
+day_2 = 0.6
+day_3 = 0.9
+day_4 = 0.925
+day_5 = 0.95
+day_6 = 0.975
+day_7 = 1.0
+future = 1.0
+
+[security]
+admin_token = ""
+rate_limit_per_second = 10
+rate_limit_burst = 30
+
+[logging]
+level = "info,snezhnaya_rail=debug"
+console_enabled = true
+file_enabled = true

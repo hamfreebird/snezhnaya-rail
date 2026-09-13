@@ -1,3 +1,4 @@
+// src/db/csv_loader.rs
 use crate::models::{Train, Notification};
 use chrono::{Datelike, Duration, Local, NaiveDate, NaiveTime};
 use csv::ReaderBuilder;
@@ -5,10 +6,12 @@ use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use tracing::info;
 
-// 为了简化引用，使用 crate::utils::helpers::get_mtime
 use crate::utils::helpers::get_mtime;
 
-pub fn load_trains_static(path: &str) -> Vec<Train> {
+pub fn load_trains_static() -> Vec<Train> {
+    let path = &crate::config::get().paths.trains_csv;
+    let business = &crate::config::get().business;
+
     let file = File::open(path).expect("无法打开 trains.csv 文件");
     let mut rdr = ReaderBuilder::new().has_headers(true).from_reader(file);
     let mut trains = Vec::new();
@@ -34,7 +37,12 @@ pub fn load_trains_static(path: &str) -> Vec<Train> {
             .collect::<String>()
             .parse::<u32>()
             .unwrap_or(1);
-        let seats_per_carriage = if model.contains("直特") { 35 } else { 40 };
+
+        let seats_per_carriage = if model.contains("直特") {
+            business.seats_per_carriage_zhite
+        } else {
+            business.seats_per_carriage_default
+        };
         let total_seats_actual = carriage_count * seats_per_carriage;
         let all_seats: Vec<u32> = (1..=total_seats_actual).collect();
 
@@ -64,7 +72,9 @@ pub fn load_trains_static(path: &str) -> Vec<Train> {
                 let mut indices: Vec<usize> = (0..weights.len()).collect();
                 indices.sort_by(|&a, &b| fractions[b].partial_cmp(&fractions[a]).unwrap());
                 for &i in &indices {
-                    if remaining == 0 { break; }
+                    if remaining == 0 {
+                        break;
+                    }
                     allocated_counts[i] += 1;
                     remaining -= 1;
                 }
@@ -106,18 +116,37 @@ pub fn load_trains_static(path: &str) -> Vec<Train> {
                 }
             }
 
-            // 数据校验
             if stations.len() - 1 != prices.len() {
-                panic!("车次 {} 站点数 {} 票价数 {} 不匹配", base_id, stations.len(), prices.len());
+                panic!(
+                    "车次 {} 站点数 {} 票价数 {} 不匹配",
+                    base_id,
+                    stations.len(),
+                    prices.len()
+                );
             }
             if stations.len() - 1 != weights.len() {
-                panic!("车次 {} 站点数 {} 权重数 {} 不匹配", base_id, stations.len(), weights.len());
+                panic!(
+                    "车次 {} 站点数 {} 权重数 {} 不匹配",
+                    base_id,
+                    stations.len(),
+                    weights.len()
+                );
             }
             if stations.len() != platforms.len() {
-                panic!("车次 {} 站点数 {} 站台数 {} 不匹配", base_id, stations.len(), platforms.len());
+                panic!(
+                    "车次 {} 站点数 {} 站台数 {} 不匹配",
+                    base_id,
+                    stations.len(),
+                    platforms.len()
+                );
             }
             if stations.len() != stop_mins.len() {
-                panic!("车次 {} 站点数 {} 停靠时间数 {} 不匹配", base_id, stations.len(), stop_mins.len());
+                panic!(
+                    "车次 {} 站点数 {} 停靠时间数 {} 不匹配",
+                    base_id,
+                    stations.len(),
+                    stop_mins.len()
+                );
             }
 
             trains.push(Train {
@@ -147,16 +176,20 @@ pub fn load_trains_static(path: &str) -> Vec<Train> {
     trains
 }
 
-pub fn load_notifications(path: &str) -> Vec<Notification> {
+pub fn load_notifications() -> Vec<Notification> {
+    let path = &crate::config::get().paths.notifications_txt;
     let content = std::fs::read_to_string(path).unwrap_or_else(|_| "".to_string());
     let lines: Vec<&str> = content.lines().collect();
     let mut notifs = Vec::new();
     let mut i = 0;
     while i + 1 < lines.len() {
         let title = lines[i].trim().to_string();
-        let content = lines[i + 1].trim().to_string();
-        if !title.is_empty() || !content.is_empty() {
-            notifs.push(Notification { title, content });
+        let content_line = lines[i + 1].trim().to_string();
+        if !title.is_empty() || !content_line.is_empty() {
+            notifs.push(Notification {
+                title,
+                content: content_line,
+            });
         }
         i += 2;
         while i < lines.len() && lines[i].trim().is_empty() {
@@ -172,6 +205,10 @@ pub fn compute_interval_seats_with_date(
     sold_counts: &HashMap<(String, usize), HashSet<u32>>,
     base_date: &NaiveDate,
 ) -> Vec<u32> {
+    let business = &crate::config::get().business;
+    let timeouts = &crate::config::get().timeouts;
+    let df = &business.discount_factors;
+
     let total = train.total_seats;
     let weights = &train.weights;
     let sum_w: u32 = weights.iter().sum();
@@ -204,7 +241,9 @@ pub fn compute_interval_seats_with_date(
             let mut indices: Vec<usize> = (0..weights.len()).collect();
             indices.sort_by(|&a, &b| fractions[b].partial_cmp(&fractions[a]).unwrap());
             for &i in &indices {
-                if remaining == 0 { break; }
+                if remaining == 0 {
+                    break;
+                }
                 allocated[i] += 1;
                 remaining -= 1;
             }
@@ -213,30 +252,39 @@ pub fn compute_interval_seats_with_date(
 
     let now = Local::now().naive_local();
     let days_diff = (*base_date - now.date()).num_days();
-    let first_dep_str = train.departure_times.first().and_then(|o| o.as_deref()).unwrap_or("00:00");
+    let first_dep_str = train
+        .departure_times
+        .first()
+        .and_then(|o| o.as_deref())
+        .unwrap_or("00:00");
+
     let factor = if days_diff < 0 {
         0.0
     } else if days_diff == 0 {
-        let mut factor = 0.15;
+        let mut factor = df.today_default;
         if let Ok(first_time) = NaiveTime::parse_from_str(first_dep_str, "%H:%M") {
             let dep_datetime = base_date.and_time(first_time);
             let mins_left = (dep_datetime - now).num_minutes();
             if mins_left <= 0 {
                 factor = 0.0;
-            } else if mins_left < 120 {
-                factor = 0.15 * (mins_left as f64 / 120.0);
+            } else if mins_left < timeouts.near_departure_window_minutes {
+                factor = df.today_default
+                    * (mins_left as f64 / timeouts.near_departure_window_minutes as f64);
             }
         }
         factor
-    } else if days_diff >= 1 && days_diff <= 7 {
+    } else if days_diff <= business.presale_days {
         match days_diff {
-            1 => 0.2,
-            2 => 0.6,
-            3 => 0.9,
-            _ => 0.9 + 0.1 * ((days_diff - 3) as f64 / 4.0),
+            1 => df.day_1,
+            2 => df.day_2,
+            3 => df.day_3,
+            4 => df.day_4,
+            5 => df.day_5,
+            6 => df.day_6,
+            _ => df.day_7,
         }
     } else {
-        1.0
+        df.future
     };
 
     let mut seats = Vec::new();
@@ -244,13 +292,20 @@ pub fn compute_interval_seats_with_date(
         let key = (train.id.clone(), i);
         let sold_count = sold_counts.get(&key).map(|set| set.len()).unwrap_or(0) as u32;
         let max_avail = (allocated[i] as f64 * factor) as u32;
-        let avail = if max_avail >= sold_count { max_avail - sold_count } else { 0 };
+        let avail = if max_avail >= sold_count {
+            max_avail - sold_count
+        } else {
+            0
+        };
         seats.push(avail);
     }
     seats
 }
 
 pub fn update_train_status_with_date(train: &mut Train, base_date: &NaiveDate) {
+    let business = &crate::config::get().business;
+    let timeouts = &crate::config::get().timeouts;
+
     let now = Local::now().naive_local();
     let today = now.date();
     let days_diff = (*base_date - today).num_days();
@@ -260,7 +315,7 @@ pub fn update_train_status_with_date(train: &mut Train, base_date: &NaiveDate) {
         train.is_selling = false;
         return;
     }
-    if days_diff > 7 {
+    if days_diff > business.presale_days {
         train.is_selling = false;
         train.is_departed = false;
         return;
@@ -282,7 +337,7 @@ pub fn update_train_status_with_date(train: &mut Train, base_date: &NaiveDate) {
                     return;
                 }
                 let diff_secs = (first_time - now.time()).num_seconds();
-                if diff_secs < 1800 {
+                if diff_secs < timeouts.stop_selling_before_departure_minutes * 60 {
                     train.is_selling = false;
                     train.is_departed = false;
                     return;
@@ -311,19 +366,29 @@ pub async fn refresh_trains_with_date(state: &crate::state::SharedState, base_da
 }
 
 pub async fn reload_all(state: &crate::state::SharedState) {
+    let cfg = crate::config::get();
     let sold_counts = state.sold_counts.read().await.clone();
-    let new_trains = load_trains_static("trains.csv");
-    let new_notifs = load_notifications("notifications.txt");
+
+    let new_trains = load_trains_static();
+    let new_notifs = load_notifications();
     let now_date = Local::now().date_naive();
+
     let mut updated_trains = Vec::new();
     for mut train in new_trains {
+        for i in 0..train.available_seats.len() {
+            let key = (train.id.clone(), i);
+            if let Some(sold_set) = sold_counts.get(&key) {
+                train.available_seats[i].retain(|s| !sold_set.contains(s));
+            }
+        }
         train.seats = compute_interval_seats_with_date(&train, &sold_counts, &now_date);
         update_train_status_with_date(&mut train, &now_date);
         updated_trains.push(train);
     }
+
     *state.trains.write().await = updated_trains;
     *state.notifications.write().await = new_notifs;
-    *state.train_mtime.write().await = get_mtime("trains.csv");
-    *state.notif_mtime.write().await = get_mtime("notifications.txt");
+    *state.train_mtime.write().await = get_mtime(&cfg.paths.trains_csv);
+    *state.notif_mtime.write().await = get_mtime(&cfg.paths.notifications_txt);
     info!("热重载完成，当前车次数: {}", state.trains.read().await.len());
 }
