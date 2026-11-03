@@ -105,7 +105,7 @@
             return;
           }
           let html = '<table style="width:100%; border-collapse:collapse; margin-top:10px;">';
-          html += '<thead><tr><th>选择</th><th>车次</th><th>出发</th><th>到达</th><th>票价(摩拉)</th><th>余票</th></tr></thead><tbody>';
+          html += '<thead><tr><th>选择</th><th>车次</th><th>出发</th><th>到达</th><th>总价(摩拉)</th><th>余票</th></tr></thead><tbody>';
           data.forEach((item) => {
             html += `<tr>
               <td><input type="radio" name="selected_train" value="${item.id}" data-price="${item.price}" data-seats="${item.seats}" data-carriage="${item.carriage_count}"></td>

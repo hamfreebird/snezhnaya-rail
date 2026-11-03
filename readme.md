@@ -3,7 +3,7 @@
 > 基于《原神》世界观，仿 12306 的在线铁路售票系统  
 
 ![Rust](https://img.shields.io/badge/Rust-1.85+-orange?logo=rust)
-![Axum](https://img.shields.io/badge/Axum-0.7-blue)
+![Axum](https://img.shields.io/badge/Axum-0.8-blue)
 ![License](https://img.shields.io/badge/License-MIT-green)
 
 ---
@@ -19,7 +19,7 @@
 
 ### 后端
 - **语言**：Rust 1.85+
-- **Web 框架**：Axum 0.7
+- **Web 框架**：Axum 0.8
 - **模板引擎**：Tera 1.19
 - **时间处理**：Chrono 0.4
 - **序列化**：Serde + Serde JSON
@@ -49,7 +49,7 @@ snezhnaya-rail/
 ├── notifications.txt           # 通知内容
 ├── orders.json                 # 订单持久化（自动生成）
 ├── order_index.json            # 订单索引（自动生成）
-├── sold_counts.json            # 已售座位持久化（自动生成）
+├── sold_counts.json            # 已售座位持久化（按车次/区间/乘车日期，自动生成）
 ├── src/
 │   ├── main.rs                 # 入口文件
 │   ├── config.rs               # 配置结构体与加载逻辑
@@ -125,7 +125,7 @@ snezhnaya-rail/
 - **纸质车票**：生成蓝白渐变背景的 PNG 图片，包含二维码、座位号、乘车信息等。
 - **限流保护**：基于 IP 的请求频率限制（每秒 10 次，突发 30 次）。
 - **订单超时自动清理**：后台任务定期扫描过期未支付订单，自动取消并释放座位，避免座位泄漏。
-- **原子持久化与自愈**：座位分配与订单保存在同一临界区完成，失败自动回滚；启动时从 sold_counts.json 恢复已售座位，保证数据一致性。
+- **原子持久化与自愈**：座位分配与订单保存在同一临界区完成，失败自动回滚；启动时先根据有效订单重建座位账本，再与 sold_counts.json 合并，保证数据一致性。
 - **配置外部化**：所有路径、超时、业务规则、安全参数均可通过 config.toml 或环境变量（SNEZ_前缀）调整，无需重新编译。
 - **热重载**：每 30 秒自动检测 `trains.csv` 和 `notifications.txt` 变更并重新加载。
 - **日志记录**：使用 `tracing` 记录控制台和文件日志（按日轮转）。

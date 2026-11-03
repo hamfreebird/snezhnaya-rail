@@ -32,6 +32,8 @@ pub fn load() -> Result<AppConfig, config::ConfigError> {
     // 环境变量前缀 SNEZ_，层级分隔符 __
     builder = builder.add_source(
         config::Environment::with_prefix("SNEZ")
+            // 文档约定：前缀后用单个下划线（SNEZ_SERVER__PORT），层级用双下划线。
+            .prefix_separator("_")
             .separator("__")
             .try_parsing(true),
     );

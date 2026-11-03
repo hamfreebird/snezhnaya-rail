@@ -53,18 +53,28 @@
         <label for="carriage_index">车厢</label>
         <select name="carriage_index" id="carriage_index" required>
           <option value="">请选择</option>
-          {% for i in range(start=1, end=train.carriage_count + 1) %}
-          <option value="{{ i }}">{{ i }}车厢</option>
+          {% for c in carriages %}
+          <option value="{{ c.index }}" data-label="{{ c.index }}车厢" data-corridor="{{ c.corridor }}" data-window="{{ c.window }}"
+            {% if c.corridor == 0 and c.window == 0 %}disabled{% endif %}>
+            {{ c.index }}车厢{% if c.corridor == 0 and c.window == 0 %}（无票）{% endif %}
+          </option>
           {% endfor %}
         </select>
       </div>
       <div style="flex:1;">
         <label for="seat_category">坐席类别</label>
         <select name="seat_category" id="seat_category" required>
-          <option value="corridor">靠走廊</option>
-          <option value="window">靠窗</option>
+          <option value="corridor" data-label="靠走廊" {% if corridor_available == 0 %}disabled{% endif %}>
+            靠走廊{% if corridor_available == 0 %}（无票）{% endif %}
+          </option>
+          <option value="window" data-label="靠窗" {% if window_available == 0 %}disabled{% endif %}>
+            靠窗{% if window_available == 0 %}（无票）{% endif %}
+          </option>
         </select>
       </div>
+    </div>
+    <div class="notice-tip" style="margin-top:6px;">
+      <i class="fas fa-info-circle"></i> 灰色选项表示当前购票张数下无票或余票不足。
     </div>
 
     <div id="orderError" style="color:#ff6b6b; margin-top:10px; text-align:center;"></div>
@@ -75,6 +85,83 @@
     </div>
   </form>
 </div>
+
+<script>
+  (function () {
+    const form = document.getElementById('orderForm');
+    const carriageSelect = document.getElementById('carriage_index');
+    const categorySelect = document.getElementById('seat_category');
+    const seatCountInput = document.getElementById('seat_count');
+    if (!form || !carriageSelect || !categorySelect || !seatCountInput) return;
+
+    const carriageOptions = Array.from(carriageSelect.options).filter(option => option.value !== '');
+    const categoryOptions = Array.from(categorySelect.options);
+
+    function requiredSeats() {
+      const value = parseInt(seatCountInput.value, 10);
+      return Number.isFinite(value) && value > 0 ? value : 1;
+    }
+
+    function availableCount(option, category) {
+      return parseInt(option.dataset[category] || '0', 10) || 0;
+    }
+
+    function setOptionState(option, available, required) {
+      const disabled = available < required;
+      option.disabled = disabled;
+
+      const baseLabel = option.dataset.label || option.textContent;
+      let suffix = '';
+      if (available <= 0) {
+        suffix = '（无票）';
+      } else if (disabled) {
+        suffix = `（仅剩${available}张）`;
+      }
+      option.textContent = baseLabel + suffix;
+      return disabled;
+    }
+
+    function updateAvailability() {
+      const required = requiredSeats();
+      const selectedCarriage = carriageSelect.selectedOptions[0];
+      const hasCarriage = selectedCarriage && selectedCarriage.value !== '';
+
+      // 坐席类别：已选车厢时按该车厢计算，否则取所有车厢中的最大值
+      categoryOptions.forEach(option => {
+        const available = hasCarriage
+          ? availableCount(selectedCarriage, option.value)
+          : Math.max(0, ...carriageOptions.map(carriage => availableCount(carriage, option.value)));
+        setOptionState(option, available, required);
+      });
+
+      // 当前类别不可选时，自动切换到第一个可用类别
+      if (categorySelect.selectedOptions[0] && categorySelect.selectedOptions[0].disabled) {
+        const firstAvailable = categoryOptions.find(option => !option.disabled);
+        if (firstAvailable) {
+          categorySelect.value = firstAvailable.value;
+        }
+      }
+
+      // 车厢：按当前坐席类别计算
+      const category = categorySelect.value;
+      carriageOptions.forEach(option => {
+        setOptionState(option, availableCount(option, category), required);
+      });
+
+      // 当前车厢不可选时，回到“请选择”
+      const currentCarriage = carriageSelect.selectedOptions[0];
+      if (currentCarriage && currentCarriage.value !== '' && currentCarriage.disabled) {
+        carriageSelect.value = '';
+      }
+    }
+
+    seatCountInput.addEventListener('input', updateAvailability);
+    seatCountInput.addEventListener('change', updateAvailability);
+    carriageSelect.addEventListener('change', updateAvailability);
+    categorySelect.addEventListener('change', updateAvailability);
+    updateAvailability();
+  })();
+</script>
 
 <script>
   document.getElementById('orderForm').addEventListener('submit', function(e) {

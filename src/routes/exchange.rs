@@ -13,9 +13,11 @@ use tracing::{info, error};
 
 use crate::state::SharedState;
 use crate::models::OrderStatus;
-use crate::db::order_store::{save_orders, save_order_index, save_sold_counts};
+use crate::db::order_store::{
+    add_seats, date_key, save_orders, save_order_index, save_sold_counts,
+};
 use crate::db::csv_loader::refresh_trains_with_date;
-use crate::seats::allocate_seats_for_interval;
+use crate::seats::{allocate_seats_for_interval, release_seats, remove_interval_seats};
 use crate::utils::helpers::{find_interval, generate_unique_order_id};
 use crate::models::Order;
 
@@ -35,11 +37,14 @@ pub async fn exchange_query(
     if order_id.is_empty() {
         return (StatusCode::BAD_REQUEST, "缺少订单号").into_response();
     }
-    let orders = state.orders.read().await;
-    if let Some(order) = orders.get(&order_id) {
+    let order = {
+        let orders = state.orders.read().await;
+        orders.get(&order_id).cloned()
+    };
+    if let Some(order) = order {
         let mut ctx = Context::new();
         ctx.insert("page_title", "改签/退签 - 至冬国铁路");
-        ctx.insert("order", order);
+        ctx.insert("order", &order);
         let now = Local::now().naive_local();
         let trains = state.trains.read().await;
         let train = trains.iter().find(|t| t.id == order.train_id);
@@ -107,29 +112,23 @@ pub async fn exchange_refund(
         None => return (StatusCode::NOT_FOUND, "订单不存在").into_response(),
     };
 
-    // 释放座位
-    if let Some(t) = trains.iter_mut().find(|t| t.id == order.train_id) {
-        if let Some((fi, ti)) = find_interval(t, &order.from_station, &order.to_station) {
-            for i in fi..ti {
-                let key = (order.train_id.clone(), i);
-                if let Some(set) = sold_counts.get_mut(&key) {
-                    for &s in &order.seat_numbers {
-                        set.remove(&s);
-                    }
-                }
-                for &s in &order.seat_numbers {
-                    t.available_seats[i].push(s);
-                }
-                t.available_seats[i].sort();
-                t.available_seats[i].dedup();
-            }
-        }
-    }
+    // 释放座位：只归还该订单实际经过的区间与乘车日期
+    release_seats(
+        &order.train_id,
+        &order.travel_date,
+        &order.from_station,
+        &order.to_station,
+        &order.seat_numbers,
+        &trains,
+        &mut sold_counts,
+    );
 
-    // 重新计算余票
-    let now_date = Local::now().date_naive();
+    // 重新计算余票（使用订单的乘车日期，避免把其他日期的占用算进来）
+    let travel_date = NaiveDate::parse_from_str(&order.travel_date, "%Y-%m-%d")
+        .unwrap_or_else(|_| Local::now().date_naive());
     for t in trains.iter_mut() {
-        t.seats = crate::db::csv_loader::compute_interval_seats_with_date(t, &sold_counts, &now_date);
+        t.seats =
+            crate::db::csv_loader::compute_interval_seats_with_date(t, &sold_counts, &travel_date);
     }
 
     // 更新索引
@@ -229,6 +228,10 @@ pub async fn exchange_change(
     // 检查原订单是否已发车
     let travel_date = NaiveDate::parse_from_str(&order.travel_date, "%Y-%m-%d")
         .unwrap_or_else(|_| Local::now().date_naive());
+    let travel_date_key = date_key(&travel_date);
+    if new_seat_count == 0 {
+        return err("改签张数必须大于 0");
+    }
     if let Some(t) = trains.iter().find(|t| t.id == order.train_id) {
         if let Some(first_time_str) = t.departure_times.first().and_then(|x| x.as_ref()) {
             if let Ok(first_time) = NaiveTime::parse_from_str(first_time_str, "%H:%M") {
@@ -261,14 +264,16 @@ pub async fn exchange_change(
     }
 
     // 3. 预分配新车次座位（此时不修改原订单）
-    let (new_from_platform, assigned_seats, new_total_price) = {
-        let new_train = &mut trains[new_train_idx];
+    let (new_from_platform, assigned_seats, new_total_price, new_fi, new_ti) = {
+        let new_train = &trains[new_train_idx];
         let (fi, ti) = match find_interval(new_train, &new_from, &new_to) {
             Some(x) => x,
             None => return err("新车次无效区间"),
         };
         let assigned = match allocate_seats_for_interval(
             new_train,
+            &sold_counts,
+            &travel_date,
             fi,
             ti,
             new_carriage,
@@ -279,16 +284,24 @@ pub async fn exchange_change(
             None => return err("该坐席类型余票不足，请选择其他车厢或类别"),
         };
         for i in fi..ti {
-            let key = (new_train_id.clone(), i);
-            let set = sold_counts.entry(key).or_insert_with(std::collections::HashSet::new);
-            for &s in &assigned {
-                set.insert(s);
-            }
+            add_seats(
+                &mut sold_counts,
+                &new_train_id,
+                i,
+                &travel_date_key,
+                &assigned,
+            );
         }
         let interval_price: u32 = new_train.prices[fi..ti].iter().sum();
+        // 改签后的订单金额就是新车次的实际总价：更贵补差、更便宜降价。
         let new_total = interval_price * new_seat_count;
-        let final_price = if new_total > order.price { new_total } else { order.price };
-        (new_train.platforms[fi].clone(), assigned, final_price)
+        (
+            new_train.platforms[fi].clone(),
+            assigned,
+            new_total,
+            fi,
+            ti,
+        )
     };
 
     // 4. 创建新订单
@@ -303,10 +316,11 @@ pub async fn exchange_change(
         seat_count: new_seat_count,
         price: new_total_price,
         status: OrderStatus::Paid,
-        expire_at: Utc::now().timestamp() + 1800,
+        expire_at: Utc::now().timestamp()
+            + crate::config::get().timeouts.order_expire_minutes * 60,
         created_at: Utc::now().timestamp(),
         pay_time: Some(Utc::now().timestamp()),
-        travel_date: order.travel_date.clone(),
+        travel_date: travel_date_key.clone(),
         group_id: None,
         seat_numbers: assigned_seats.clone(),
         seat_category: new_category.clone(),
@@ -332,23 +346,14 @@ pub async fn exchange_change(
     if !save_ok {
         // 回滚：移除新订单，释放新车次座位
         orders.remove(&new_order_id);
-        if let Some(new_train) = trains.get_mut(new_train_idx) {
-            if let Some((fi, ti)) = find_interval(new_train, &new_from, &new_to) {
-                for i in fi..ti {
-                    let key = (new_train_id.clone(), i);
-                    if let Some(set) = sold_counts.get_mut(&key) {
-                        for &s in &assigned_seats {
-                            set.remove(&s);
-                        }
-                    }
-                    for &s in &assigned_seats {
-                        new_train.available_seats[i].push(s);
-                    }
-                    new_train.available_seats[i].sort();
-                    new_train.available_seats[i].dedup();
-                }
-            }
-        }
+        remove_interval_seats(
+            &new_train_id,
+            &travel_date_key,
+            new_fi,
+            new_ti,
+            &assigned_seats,
+            &mut sold_counts,
+        );
         return if is_ajax {
             (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "success": false, "message": "保存失败，请重试" }))).into_response()
         } else {
@@ -357,23 +362,15 @@ pub async fn exchange_change(
     }
 
     // 6. 持久化成功后：释放原票座位
-    if let Some(old_train) = trains.iter_mut().find(|t| t.id == order.train_id) {
-        if let Some((fi, ti)) = find_interval(old_train, &order.from_station, &order.to_station) {
-            for i in fi..ti {
-                let key = (order.train_id.clone(), i);
-                if let Some(set) = sold_counts.get_mut(&key) {
-                    for &s in &order.seat_numbers {
-                        set.remove(&s);
-                    }
-                }
-                for &s in &order.seat_numbers {
-                    old_train.available_seats[i].push(s);
-                }
-                old_train.available_seats[i].sort();
-                old_train.available_seats[i].dedup();
-            }
-        }
-    }
+    release_seats(
+        &order.train_id,
+        &travel_date_key,
+        &order.from_station,
+        &order.to_station,
+        &order.seat_numbers,
+        &trains,
+        &mut sold_counts,
+    );
 
     // 7. 取消原订单
     if let Some(o) = orders.get_mut(&order_id) {
@@ -444,11 +441,12 @@ pub async fn exchange_available(
         return (StatusCode::BAD_REQUEST, "缺少订单号").into_response();
     }
 
-    let orders = state.orders.read().await;
-    let order = orders.get(&order_id).cloned();
-    let order = match order {
-        Some(o) => o,
-        None => return (StatusCode::NOT_FOUND, "订单不存在").into_response(),
+    let order = {
+        let orders = state.orders.read().await;
+        match orders.get(&order_id) {
+            Some(o) => o.clone(),
+            None => return (StatusCode::NOT_FOUND, "订单不存在").into_response(),
+        }
     };
 
     let travel_date = NaiveDate::parse_from_str(&order.travel_date, "%Y-%m-%d")
@@ -458,6 +456,7 @@ pub async fn exchange_available(
     let from = &order.from_station;
     let to = &order.to_station;
 
+    refresh_trains_with_date(&state, &travel_date).await;
     let trains = state.trains.read().await;
     let now = Local::now().naive_local();
     let mut available = Vec::new();
@@ -479,7 +478,8 @@ pub async fn exchange_available(
             if min_seats == 0 {
                 continue;
             }
-            let price: u32 = train.prices[fi..ti].iter().sum();
+            let unit_price: u32 = train.prices[fi..ti].iter().sum();
+            let total_price = unit_price.saturating_mul(order.seat_count);
             let departure = train.departure_times[fi].as_deref().unwrap_or("");
             let arrival = train.arrival_times[ti].as_deref().unwrap_or("");
 
@@ -489,7 +489,9 @@ pub async fn exchange_available(
                 "name": train.name,
                 "departure": departure,
                 "arrival": arrival,
-                "price": price,
+                // price 与订单总价同口径，unit_price 供需要按人展示的前端使用
+                "price": total_price,
+                "unit_price": unit_price,
                 "seats": min_seats,
                 "carriage_count": train.carriage_count,
             }));

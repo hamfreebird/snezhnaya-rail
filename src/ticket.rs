@@ -47,7 +47,7 @@ pub fn generate_ticket_image(order: &Order, seat_number: &str, train: &Train) ->
 
     draw_text_mut(&mut img, dark_blue, 10, 120, scale_mid2, &font, &format!("车次: {}", train.base_train_id));
 
-    let price = order.price / order.seat_count;
+    let price = order.price / order.seat_count.max(1);
     draw_text_mut(&mut img, dark_blue, 10, 140, scale_mid2, &font, &format!("票价: {} 摩拉", price));
     draw_text_mut(&mut img, dark_blue, 10, 160, scale_mid2, &font, "限乘当日当次车  中途下车失效");
     draw_text_mut(&mut img, dark_blue, 10, 180, scale_mid2, &font, "唯我皇安娜丝塔夏将带来无垢的黎明!");

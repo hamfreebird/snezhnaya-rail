@@ -32,10 +32,11 @@ pub async fn cleanup_expired_orders(state: &SharedState) {
     for order in &cancelled {
         release_seats(
             &order.train_id,
+            &order.travel_date,
             &order.from_station,
             &order.to_station,
             &order.seat_numbers,
-            &mut trains,
+            &trains,
             &mut sold_counts,
         );
     }

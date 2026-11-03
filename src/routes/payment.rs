@@ -15,8 +15,11 @@ pub async fn payment_page(
     State(state): State<SharedState>,
     Path(order_id): Path<String>,
 ) -> Response {
-    let orders = state.orders.read().await;
-    if let Some(order) = orders.get(&order_id) {
+    let order = {
+        let orders = state.orders.read().await;
+        orders.get(&order_id).cloned()
+    };
+    if let Some(order) = order {
         if order.status != crate::models::OrderStatus::Pending {
             return (StatusCode::BAD_REQUEST, "订单状态异常").into_response();
         }
@@ -31,7 +34,7 @@ pub async fn payment_page(
             .unwrap_or_else(|| order.train_id.clone());
         let mut ctx = Context::new();
         ctx.insert("page_title", "支付 - 至冬国铁路");
-        ctx.insert("order", order);
+        ctx.insert("order", &order);
         ctx.insert("base_train_id", &base_train_id);
         let html = state.tera.render("payment.html", &ctx).unwrap();
         Html(html).into_response()

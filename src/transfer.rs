@@ -1,15 +1,56 @@
 use crate::models::{Train, ArrivalInfo, DepartureInfo, TransferPlan};
-use chrono::{Local, NaiveDate, NaiveTime, Datelike};
+use chrono::{Datelike, Local, NaiveDate, NaiveDateTime};
 use std::collections::HashMap;
 use tracing::debug;
 
-fn parse_time_handle_24h(s: &str) -> NaiveTime {
-    let s = if s.starts_with("24:") {
-        format!("00:{}", &s[3..])
-    } else {
-        s.to_string()
-    };
-    NaiveTime::parse_from_str(&s, "%H:%M").unwrap()
+/// 把 "HH:MM"（允许 24:xx 表示次日）转换为“从乘车日 00:00 起的分钟数”。
+fn parse_minutes(value: &str) -> Option<i64> {
+    let mut parts = value.trim().split(':');
+    let hour: i64 = parts.next()?.parse().ok()?;
+    let minute: i64 = parts.next()?.parse().ok()?;
+    if !(0..=24).contains(&hour) || minute >= 60 {
+        return None;
+    }
+    Some(hour * 60 + minute)
+}
+
+/// 计算一趟车各站的绝对分钟偏移。遇到时间回退（跨零点或 24:xx 后续站）自动加一天，
+/// 从而保证同一趟车上的区间时长不会变成负数。
+fn train_time_offsets(train: &Train) -> Vec<(Option<i64>, Option<i64>)> {
+    let mut result = Vec::with_capacity(train.stations.len());
+    let mut last = 0i64;
+
+    for i in 0..train.stations.len() {
+        let mut arrival = train.arrival_times[i]
+            .as_deref()
+            .and_then(parse_minutes);
+        if let Some(value) = arrival.as_mut() {
+            while *value < last {
+                *value += 24 * 60;
+            }
+            last = *value;
+        }
+
+        let mut departure = train.departure_times[i]
+            .as_deref()
+            .and_then(parse_minutes);
+        if let Some(value) = departure.as_mut() {
+            while *value < last {
+                *value += 24 * 60;
+            }
+            last = *value;
+        }
+
+        result.push((arrival, departure));
+    }
+
+    result
+}
+
+fn offset_datetime(date: &NaiveDate, offset: i64) -> NaiveDateTime {
+    date.and_hms_opt(0, 0, 0)
+        .expect("合法日期")
+        + chrono::Duration::minutes(offset)
 }
 
 pub fn find_transfers(
@@ -27,26 +68,38 @@ pub fn find_transfers(
         .filter(|t| t.run_day == weekday && t.is_selling && !t.is_departed)
         .collect();
 
+    let offsets: HashMap<String, Vec<(Option<i64>, Option<i64>)>> = available
+        .iter()
+        .map(|train| (train.id.clone(), train_time_offsets(train)))
+        .collect();
+
     let mut arrival_map: HashMap<String, Vec<ArrivalInfo>> = HashMap::new();
     for train in &available {
+        let time_offsets = &offsets[&train.id];
         if let Some(fi) = train.stations.iter().position(|s| s == from) {
             for i in (fi + 1)..train.stations.len() {
                 let x = &train.stations[i];
-                let arrival_time = train.arrival_times[i].as_ref().unwrap();
+                let Some(arrival_time) = train.arrival_times[i].as_ref() else {
+                    continue;
+                };
+                let Some(departure_time) = train.departure_times[fi].as_ref() else {
+                    continue;
+                };
+                let (Some(dep_offset), Some(_)) = (time_offsets[fi].1, time_offsets[i].0) else {
+                    continue;
+                };
+                if now >= offset_datetime(travel_date, dep_offset) {
+                    continue;
+                }
+
                 let price: u32 = train.prices[fi..i].iter().sum();
                 let min_seats = train.seats[fi..i].iter().min().cloned().unwrap_or(0);
-                if let Ok(arr_dt) = NaiveTime::parse_from_str(arrival_time, "%H:%M") {
-                    let dep_datetime = travel_date.and_time(arr_dt);
-                    if now >= dep_datetime {
-                        continue;
-                    }
-                }
                 arrival_map.entry(x.clone()).or_default().push(ArrivalInfo {
                     train_id: train.id.clone(),
                     base_train_id: train.base_train_id.clone(),
                     from_station: from.to_string(),
                     to_station: x.clone(),
-                    departure_time: train.departure_times[fi].as_ref().unwrap().clone(),
+                    departure_time: departure_time.clone(),
                     arrival_time: arrival_time.clone(),
                     price,
                     min_seats,
@@ -59,25 +112,32 @@ pub fn find_transfers(
 
     let mut departure_map: HashMap<String, Vec<DepartureInfo>> = HashMap::new();
     for train in &available {
+        let time_offsets = &offsets[&train.id];
         if let Some(ti) = train.stations.iter().position(|s| s == to) {
             for i in 0..ti {
                 let x = &train.stations[i];
-                let dep_time = train.departure_times[i].as_ref().unwrap();
+                let Some(dep_time) = train.departure_times[i].as_ref() else {
+                    continue;
+                };
+                let Some(arrival_time) = train.arrival_times[ti].as_ref() else {
+                    continue;
+                };
+                let Some(dep_offset) = time_offsets[i].1 else {
+                    continue;
+                };
+                if now >= offset_datetime(travel_date, dep_offset) {
+                    continue;
+                }
+
                 let price: u32 = train.prices[i..ti].iter().sum();
                 let min_seats = train.seats[i..ti].iter().min().cloned().unwrap_or(0);
-                if let Ok(dep_dt) = NaiveTime::parse_from_str(dep_time, "%H:%M") {
-                    let dep_datetime = travel_date.and_time(dep_dt);
-                    if now >= dep_datetime {
-                        continue;
-                    }
-                }
                 departure_map.entry(x.clone()).or_default().push(DepartureInfo {
                     train_id: train.id.clone(),
                     base_train_id: train.base_train_id.clone(),
                     from_station: x.clone(),
                     to_station: to.to_string(),
                     departure_time: dep_time.clone(),
-                    arrival_time: train.arrival_times[ti].as_ref().unwrap().clone(),
+                    arrival_time: arrival_time.clone(),
                     price,
                     min_seats,
                     fi: i,
@@ -95,18 +155,32 @@ pub fn find_transfers(
                     if a.train_id == d.train_id {
                         continue;
                     }
-                    let arr_time = parse_time_handle_24h(&a.arrival_time);
-                    let dep_time = parse_time_handle_24h(&d.departure_time);
-                    let wait_minutes = (dep_time - arr_time).num_minutes();
+
+                    let a_offsets = &offsets[&a.train_id];
+                    let d_offsets = &offsets[&d.train_id];
+                    let (Some(first_dep), Some(first_arr)) =
+                        (a_offsets[a.fi].1, a_offsets[a.ti].0)
+                    else {
+                        continue;
+                    };
+                    let (Some(second_dep), Some(second_arr)) =
+                        (d_offsets[d.fi].1, d_offsets[d.ti].0)
+                    else {
+                        continue;
+                    };
+
+                    // 换乘发生在同一次出行中：若第二段发车早于第一段到达，
+                    // 视为次日发车（必要时继续顺延），而不是丢弃该方案。
+                    let mut wait_minutes = second_dep - first_arr;
+                    while wait_minutes < 0 {
+                        wait_minutes += 24 * 60;
+                    }
                     if wait_minutes < min_transfer {
                         continue;
                     }
-                    let first_dep = parse_time_handle_24h(&a.departure_time);
-                    let first_arr = parse_time_handle_24h(&a.arrival_time);
-                    let first_dur = (first_arr - first_dep).num_minutes();
-                    let second_dep = parse_time_handle_24h(&d.departure_time);
-                    let second_arr = parse_time_handle_24h(&d.arrival_time);
-                    let second_dur = (second_arr - second_dep).num_minutes();
+
+                    let first_dur = first_arr - first_dep;
+                    let second_dur = second_arr - second_dep;
                     let total_duration = first_dur + wait_minutes + second_dur;
                     let total_price = a.price + d.price;
                     let min_seats = a.min_seats.min(d.min_seats);
@@ -127,7 +201,8 @@ pub fn find_transfers(
 
     plans.sort_by_key(|p| p.total_duration);
     plans.retain(|p| p.min_seats > 0);
-    plans.truncate(50);
+    let max_plans = crate::config::get().business.max_transfer_plans;
+    plans.truncate(max_plans);
     debug!("找到 {} 个换乘方案", plans.len());
     plans
 }

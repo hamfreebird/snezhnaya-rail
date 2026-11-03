@@ -1,8 +1,8 @@
 // src/db/csv_loader.rs
+use crate::db::order_store::{date_key, sold_count_for, SoldCounts};
 use crate::models::{Train, Notification};
 use chrono::{Datelike, Duration, Local, NaiveDate, NaiveTime};
 use csv::ReaderBuilder;
-use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use tracing::info;
 
@@ -46,46 +46,9 @@ pub fn load_trains_static() -> Vec<Train> {
         let total_seats_actual = carriage_count * seats_per_carriage;
         let all_seats: Vec<u32> = (1..=total_seats_actual).collect();
 
-        let sum_w: u32 = weights.iter().sum();
-        let mut allocated = vec![Vec::new(); weights.len()];
-        if sum_w == 0 {
-            let base = total_seats_actual / (weights.len() as u32);
-            let rem = total_seats_actual % (weights.len() as u32);
-            let mut start = 0;
-            for i in 0..weights.len() {
-                let count = if i < rem as usize { base + 1 } else { base };
-                allocated[i] = all_seats[start..start + count as usize].to_vec();
-                start += count as usize;
-            }
-        } else {
-            let mut floors = Vec::new();
-            let mut fractions = Vec::new();
-            for w in &weights {
-                let share = (total_seats_actual as f64 * (*w as f64)) / sum_w as f64;
-                let floor = share.floor() as u32;
-                floors.push(floor);
-                fractions.push(share - floor as f64);
-            }
-            let mut allocated_counts: Vec<u32> = floors.iter().cloned().collect();
-            let mut remaining = total_seats_actual - allocated_counts.iter().sum::<u32>();
-            if remaining > 0 {
-                let mut indices: Vec<usize> = (0..weights.len()).collect();
-                indices.sort_by(|&a, &b| fractions[b].partial_cmp(&fractions[a]).unwrap());
-                for &i in &indices {
-                    if remaining == 0 {
-                        break;
-                    }
-                    allocated_counts[i] += 1;
-                    remaining -= 1;
-                }
-            }
-            let mut start = 0;
-            for i in 0..weights.len() {
-                let count = allocated_counts[i] as usize;
-                allocated[i] = all_seats[start..start + count].to_vec();
-                start += count;
-            }
-        }
+        // 每个区间都拥有同一套全局座位号；权重只作为该区间的售票容量上限，
+        // 不再把座位号切分成互不相交的区间段。
+        let available_seats = vec![all_seats; weights.len()];
 
         let run_days: Vec<u8> = run_days_str
             .split('-')
@@ -164,7 +127,7 @@ pub fn load_trains_static() -> Vec<Train> {
                 total_seats: total_seats_actual,
                 carriage_count,
                 seats_per_carriage,
-                available_seats: allocated.clone(),
+                available_seats: available_seats.clone(),
                 seats: vec![],
                 is_departed: false,
                 is_selling: false,
@@ -185,7 +148,8 @@ pub fn load_notifications() -> Vec<Notification> {
     while i + 1 < lines.len() {
         let title = lines[i].trim().to_string();
         let content_line = lines[i + 1].trim().to_string();
-        if !title.is_empty() || !content_line.is_empty() {
+        // 通知必须同时有标题和内容；尾部单行标语不应被解析成空通知。
+        if !title.is_empty() && !content_line.is_empty() {
             notifs.push(Notification {
                 title,
                 content: content_line,
@@ -202,7 +166,7 @@ pub fn load_notifications() -> Vec<Notification> {
 
 pub fn compute_interval_seats_with_date(
     train: &Train,
-    sold_counts: &HashMap<(String, usize), HashSet<u32>>,
+    sold_counts: &SoldCounts,
     base_date: &NaiveDate,
 ) -> Vec<u32> {
     let business = &crate::config::get().business;
@@ -265,11 +229,12 @@ pub fn compute_interval_seats_with_date(
         if let Ok(first_time) = NaiveTime::parse_from_str(first_dep_str, "%H:%M") {
             let dep_datetime = base_date.and_time(first_time);
             let mins_left = (dep_datetime - now).num_minutes();
+            let window = timeouts.near_departure_window_minutes.max(1);
             if mins_left <= 0 {
                 factor = 0.0;
-            } else if mins_left < timeouts.near_departure_window_minutes {
-                factor = df.today_default
-                    * (mins_left as f64 / timeouts.near_departure_window_minutes as f64);
+            } else if mins_left < window {
+                factor = (df.today_default * (mins_left as f64 / window as f64))
+                    .max(df.near_departure_min);
             }
         }
         factor
@@ -287,10 +252,10 @@ pub fn compute_interval_seats_with_date(
         df.future
     };
 
+    let travel_date = date_key(base_date);
     let mut seats = Vec::new();
     for i in 0..weights.len() {
-        let key = (train.id.clone(), i);
-        let sold_count = sold_counts.get(&key).map(|set| set.len()).unwrap_or(0) as u32;
+        let sold_count = sold_count_for(sold_counts, &train.id, i, &travel_date);
         let max_avail = (allocated[i] as f64 * factor) as u32;
         let avail = if max_avail >= sold_count {
             max_avail - sold_count
@@ -375,12 +340,8 @@ pub async fn reload_all(state: &crate::state::SharedState) {
 
     let mut updated_trains = Vec::new();
     for mut train in new_trains {
-        for i in 0..train.available_seats.len() {
-            let key = (train.id.clone(), i);
-            if let Some(sold_set) = sold_counts.get(&key) {
-                train.available_seats[i].retain(|s| !sold_set.contains(s));
-            }
-        }
+        // available_seats 是各区间共享的物理座位全集，不随日期变化；
+        // 实际占用完全由按日期索引的 sold_counts 决定。
         train.seats = compute_interval_seats_with_date(&train, &sold_counts, &now_date);
         update_train_status_with_date(&mut train, &now_date);
         updated_trains.push(train);

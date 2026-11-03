@@ -7,15 +7,15 @@ use axum::{
 };
 use tera::Context;
 use chrono::{Local, NaiveDate, Duration, Utc};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use uuid::Uuid;
 use tracing::{info, error};
 use serde_json::json;
 
 use crate::state::SharedState;
 use crate::db::csv_loader::refresh_trains_with_date;
-use crate::db::order_store::{save_orders, save_sold_counts};
-use crate::seats::allocate_seats_for_interval;
+use crate::db::order_store::{add_seats, date_key, save_orders, save_sold_counts};
+use crate::seats::{allocate_seats_for_interval, release_seats, remove_interval_seats};
 use crate::utils::helpers::{find_interval, generate_unique_order_id};
 use crate::models::{Order, OrderStatus};
 
@@ -23,9 +23,7 @@ use crate::models::{Order, OrderStatus};
 pub struct CreateOrderForm {
     pub train_id: String,
     pub from: String,
-    pub from_platform: String,
     pub to: String,
-    pub total_price: u32,
     pub passenger_name: String,
     pub seat_count: u32,
     pub date: String,
@@ -80,6 +78,7 @@ pub async fn order_form(
 
     let trains = state.trains.read().await;
     let train = trains.iter().find(|t| t.id == train_id).cloned();
+    drop(trains);
     if let Some(train) = train {
         if !train.is_selling {
             return (StatusCode::BAD_REQUEST, "该车次已停止售票或已发车").into_response();
@@ -89,6 +88,19 @@ pub async fn order_form(
             let arrival = &train.arrival_times[ti].as_ref();
             let total_price: u32 = train.prices[fi..ti].iter().sum();
             let min_seats = train.seats[fi..ti].iter().min().cloned().unwrap_or(0);
+            let sold_counts = state.sold_counts.read().await;
+            let carriages =
+                crate::seats::carriage_availability(&train, &sold_counts, &base_date, fi, ti);
+            let corridor_available = carriages
+                .iter()
+                .map(|carriage| carriage.corridor)
+                .max()
+                .unwrap_or(0);
+            let window_available = carriages
+                .iter()
+                .map(|carriage| carriage.window)
+                .max()
+                .unwrap_or(0);
             let mut ctx = Context::new();
             let from_platform = &train.platforms[fi];
             ctx.insert("from_platform", from_platform);
@@ -102,6 +114,9 @@ pub async fn order_form(
             ctx.insert("min_seats", &min_seats);
             ctx.insert("selected_date", &date_str);
             ctx.insert("carriage_count", &train.carriage_count);
+            ctx.insert("carriages", &carriages);
+            ctx.insert("corridor_available", &corridor_available);
+            ctx.insert("window_available", &window_available);
             let html = state.tera.render("order_form.html", &ctx).unwrap();
             return Html(html).into_response();
         } else {
@@ -137,8 +152,14 @@ pub async fn create_order(
         None => return err_response(is_ajax, "无效的站点区间", StatusCode::BAD_REQUEST),
     };
 
+    if form.seat_count == 0 {
+        return err_response(is_ajax, "购票张数必须大于 0", StatusCode::BAD_REQUEST);
+    }
+
     let assigned = match allocate_seats_for_interval(
-        &mut trains[train_idx],
+        &trains[train_idx],
+        &sold_counts,
+        &base_date,
         fi,
         ti,
         form.carriage_index,
@@ -149,32 +170,38 @@ pub async fn create_order(
         None => return err_response(is_ajax, "该类坐席余票不足", StatusCode::BAD_REQUEST),
     };
 
+    let travel_date = date_key(&base_date);
     for i in fi..ti {
-        let key = (form.train_id.clone(), i);
-        let set = sold_counts.entry(key).or_insert_with(HashSet::new);
-        for &s in &assigned {
-            set.insert(s);
-        }
+        add_seats(
+            &mut sold_counts,
+            &form.train_id,
+            i,
+            &travel_date,
+            &assigned,
+        );
     }
 
     let order_id = generate_unique_order_id(&orders);
     let expire_minutes = crate::config::get().timeouts.order_expire_minutes;
     let expire_at = Utc::now() + Duration::minutes(expire_minutes);
+    // 票价与站台均由服务端根据车次数据计算，不采信客户端表单。
+    let unit_price: u32 = trains[train_idx].prices[fi..ti].iter().sum();
+    let from_platform = trains[train_idx].platforms[fi].clone();
 
     let order = Order {
         id: order_id.clone(),
         train_id: form.train_id.clone(),
         from_station: form.from.clone(),
         to_station: form.to.clone(),
-        from_platform: form.from_platform.clone(),
+        from_platform,
         passenger_name: form.passenger_name.clone(),
         seat_count: form.seat_count,
-        price: form.total_price * form.seat_count,
+        price: unit_price * form.seat_count,
         status: OrderStatus::Pending,
         expire_at: expire_at.timestamp(),
         created_at: Utc::now().timestamp(),
         pay_time: None,
-        travel_date: form.date.clone(),
+        travel_date: travel_date.clone(),
         group_id: None,
         seat_numbers: assigned.clone(),
         seat_category: form.seat_category.clone(),
@@ -199,19 +226,15 @@ pub async fn create_order(
 
     if !save_ok {
         orders.remove(&order_id);
-        for i in fi..ti {
-            let key = (form.train_id.clone(), i);
-            if let Some(set) = sold_counts.get_mut(&key) {
-                for &s in &assigned {
-                    set.remove(&s);
-                }
-            }
-            for &s in &assigned {
-                trains[train_idx].available_seats[i].push(s);
-            }
-            trains[train_idx].available_seats[i].sort();
-            trains[train_idx].available_seats[i].dedup();
-        }
+        release_seats(
+            &form.train_id,
+            &travel_date,
+            &form.from,
+            &form.to,
+            &assigned,
+            &trains,
+            &mut sold_counts,
+        );
         trains[train_idx].seats = crate::db::csv_loader::compute_interval_seats_with_date(
             &trains[train_idx],
             &sold_counts,
@@ -255,9 +278,14 @@ pub async fn order_transfer(
 
     info!("进入 order_transfer，is_ajax={}", is_ajax);
 
-    let mut trains = state.trains.write().await;
+    if form.seat_count == 0 {
+        return err_response(is_ajax, "购票张数必须大于 0", StatusCode::BAD_REQUEST);
+    }
+
+    let trains = state.trains.write().await;
     let mut sold_counts = state.sold_counts.write().await;
     let mut orders = state.orders.write().await;
+    let travel_date = date_key(&base_date);
 
     let train1_idx = match trains.iter().position(|t| t.id == form.first_train_id) {
         Some(i) => i,
@@ -277,7 +305,9 @@ pub async fn order_transfer(
     };
 
     let assigned1 = match allocate_seats_for_interval(
-        &mut trains[train1_idx],
+        &trains[train1_idx],
+        &sold_counts,
+        &base_date,
         fi1,
         ti1,
         form.carriage_index,
@@ -288,42 +318,46 @@ pub async fn order_transfer(
         None => return err_response(is_ajax, "第一段该类坐席余票不足", StatusCode::BAD_REQUEST),
     };
     for i in fi1..ti1 {
-        let key = (form.first_train_id.clone(), i);
-        let set = sold_counts.entry(key).or_insert_with(HashSet::new);
-        for &s in &assigned1 {
-            set.insert(s);
-        }
+        add_seats(
+            &mut sold_counts,
+            &form.first_train_id,
+            i,
+            &travel_date,
+            &assigned1,
+        );
     }
     let price1: u32 = trains[train1_idx].prices[fi1..ti1].iter().sum();
 
     if !trains[train2_idx].is_selling {
-        rollback_seats(
-            &mut trains[train1_idx],
-            &mut sold_counts,
+        remove_interval_seats(
             &form.first_train_id,
+            &travel_date,
             fi1,
             ti1,
             &assigned1,
+            &mut sold_counts,
         );
         return err_response(is_ajax, "第二段车次已停止售票", StatusCode::BAD_REQUEST);
     }
     let (fi2, ti2) = match find_interval(&trains[train2_idx], &form.second_from, &form.second_to) {
         Some(x) => x,
         None => {
-            rollback_seats(
-                &mut trains[train1_idx],
-                &mut sold_counts,
+            remove_interval_seats(
                 &form.first_train_id,
+                &travel_date,
                 fi1,
                 ti1,
                 &assigned1,
+                &mut sold_counts,
             );
             return err_response(is_ajax, "第二段无效区间", StatusCode::BAD_REQUEST);
         }
     };
 
     let assigned2 = match allocate_seats_for_interval(
-        &mut trains[train2_idx],
+        &trains[train2_idx],
+        &sold_counts,
+        &base_date,
         fi2,
         ti2,
         form.carriage_index,
@@ -332,23 +366,25 @@ pub async fn order_transfer(
     ) {
         Some(s) => s,
         None => {
-            rollback_seats(
-                &mut trains[train1_idx],
-                &mut sold_counts,
+            remove_interval_seats(
                 &form.first_train_id,
+                &travel_date,
                 fi1,
                 ti1,
                 &assigned1,
+                &mut sold_counts,
             );
             return err_response(is_ajax, "第二段该类坐席余票不足", StatusCode::BAD_REQUEST);
         }
     };
     for i in fi2..ti2 {
-        let key = (form.second_train_id.clone(), i);
-        let set = sold_counts.entry(key).or_insert_with(HashSet::new);
-        for &s in &assigned2 {
-            set.insert(s);
-        }
+        add_seats(
+            &mut sold_counts,
+            &form.second_train_id,
+            i,
+            &travel_date,
+            &assigned2,
+        );
     }
     let price2: u32 = trains[train2_idx].prices[fi2..ti2].iter().sum();
 
@@ -371,7 +407,7 @@ pub async fn order_transfer(
         expire_at: expire_at.timestamp(),
         created_at: Utc::now().timestamp(),
         pay_time: None,
-        travel_date: form.date.clone(),
+        travel_date: travel_date.clone(),
         group_id: Some(group_id.clone()),
         seat_numbers: assigned1.clone(),
         seat_category: form.seat_category.clone(),
@@ -390,7 +426,7 @@ pub async fn order_transfer(
         expire_at: expire_at.timestamp(),
         created_at: Utc::now().timestamp(),
         pay_time: None,
-        travel_date: form.date.clone(),
+        travel_date: travel_date.clone(),
         group_id: Some(group_id.clone()),
         seat_numbers: assigned2.clone(),
         seat_category: form.seat_category.clone(),
@@ -417,21 +453,21 @@ pub async fn order_transfer(
     if !save_ok {
         orders.remove(&order1_id);
         orders.remove(&order2_id);
-        rollback_seats(
-            &mut trains[train1_idx],
-            &mut sold_counts,
+        remove_interval_seats(
             &form.first_train_id,
+            &travel_date,
             fi1,
             ti1,
             &assigned1,
-        );
-        rollback_seats(
-            &mut trains[train2_idx],
             &mut sold_counts,
+        );
+        remove_interval_seats(
             &form.second_train_id,
+            &travel_date,
             fi2,
             ti2,
             &assigned2,
+            &mut sold_counts,
         );
         return err_response(
             is_ajax,
@@ -448,29 +484,6 @@ pub async fn order_transfer(
             .into_response()
     } else {
         Redirect::to(&format!("/transfer_confirm?group_id={}", group_id)).into_response()
-    }
-}
-
-fn rollback_seats(
-    train: &mut crate::models::Train,
-    sold_counts: &mut HashMap<(String, usize), HashSet<u32>>,
-    train_id: &str,
-    fi: usize,
-    ti: usize,
-    assigned: &[u32],
-) {
-    for i in fi..ti {
-        let key = (train_id.to_string(), i);
-        if let Some(set) = sold_counts.get_mut(&key) {
-            for &s in assigned {
-                set.remove(&s);
-            }
-        }
-        for &s in assigned {
-            train.available_seats[i].push(s);
-        }
-        train.available_seats[i].sort();
-        train.available_seats[i].dedup();
     }
 }
 

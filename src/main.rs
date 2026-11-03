@@ -10,7 +10,9 @@ mod cleanup;
 mod config;
 
 use state::AppState;
-use db::order_store::{load_orders, load_sold_counts};
+use db::order_store::{
+    load_orders, load_sold_counts, merge_sold_counts, rebuild_sold_counts_from_orders,
+};
 use db::csv_loader::{load_trains_static, load_notifications};
 use routes::create_routes;
 use utils::logging::init_logging;
@@ -20,6 +22,7 @@ use std::sync::Arc;
 use std::time::Duration as StdDuration;
 use tokio::time;
 use tower_http::services::ServeDir;
+use tower_governor::{governor::GovernorConfigBuilder, GovernorLayer};
 use tracing::{info, error};
 use chrono::Local;
 use tower_http::trace::TraceLayer;
@@ -49,32 +52,31 @@ async fn main() {
         }
     };
 
-    // 4. 加载已售座位与车次
-    let sold_counts = load_sold_counts();
+    // 4. 加载车次、订单与已售座位
     let static_trains = load_trains_static();
+    let orders = load_orders();
+    let mut sold_counts = load_sold_counts();
+    // 旧版 sold_counts 没有乘车日期；以有效订单为准重建，再与新格式账本合并。
+    let rebuilt_counts = rebuild_sold_counts_from_orders(&static_trains, &orders);
+    merge_sold_counts(&mut sold_counts, rebuilt_counts);
+
     let now_date = Local::now().date_naive();
     let mut trains = Vec::new();
     for mut train in static_trains {
-        for i in 0..train.available_seats.len() {
-            let key = (train.id.clone(), i);
-            if let Some(sold_set) = sold_counts.get(&key) {
-                train.available_seats[i].retain(|s| !sold_set.contains(s));
-            }
-        }
+        // available_seats 是各区间共享的全局物理座位号，占用由日期化的 sold_counts 决定。
         train.seats =
             db::csv_loader::compute_interval_seats_with_date(&train, &sold_counts, &now_date);
         db::csv_loader::update_train_status_with_date(&mut train, &now_date);
         trains.push(train);
     }
 
-    // 5. 加载通知、订单索引、订单
+    // 5. 加载通知、订单索引
     let notifications = load_notifications();
     let order_index = if let Ok(data) = std::fs::read_to_string(&cfg.paths.order_index_json) {
         serde_json::from_str(&data).unwrap_or_else(|_| HashMap::new())
     } else {
         HashMap::new()
     };
-    let orders = load_orders();
 
     // 6. 构建全局状态
     let state = Arc::new(AppState {
@@ -123,14 +125,25 @@ async fn main() {
         }
     });
 
-    // 9. 构建路由
+    // 9. 构建限流配置（按 IP 限流，配置单位为“每秒请求数”）
+    let rate_per_second = cfg.security.rate_limit_per_second.max(1);
+    let replenish_ms = (1000 / rate_per_second).max(1);
+    let governor_conf = GovernorConfigBuilder::default()
+        .per_millisecond(replenish_ms)
+        .burst_size(cfg.security.rate_limit_burst.max(1))
+        .finish()
+        .expect("限流配置无效");
+
+    // 10. 构建路由
     let static_prefix = cfg.server.static_url_prefix.clone();
     let static_dir = cfg.server.static_dir.clone();
     let app = create_routes(state)
+        // 只对业务接口限流，静态资源不占用配额
+        .layer(GovernorLayer::new(governor_conf))
         .nest_service(&static_prefix, ServeDir::new(static_dir))
         .layer(TraceLayer::new_for_http());
 
-    // 10. 绑定监听
+    // 11. 绑定监听
     let bind_addr = format!("{}:{}", cfg.server.host, cfg.server.port);
     let listener = match tokio::net::TcpListener::bind(&bind_addr).await {
         Ok(l) => l,
