@@ -511,6 +511,49 @@ footer {
   line-height: 1.6;
 }
 
+/* 你知道吗？轮换卡片 */
+.did-you-know {
+  display: flex;
+  align-items: flex-start;
+  gap: 14px;
+  background: linear-gradient(145deg, #1a2238, #0f172a);
+  border: 1px solid #2a4a6a;
+  border-left: 4px solid #4dc3ff;
+  border-radius: 12px;
+  padding: 18px 20px;
+  margin: 28px 0 0;
+  box-shadow: 0 0 20px rgba(0, 180, 216, 0.1);
+}
+
+.did-you-know-icon {
+  flex: 0 0 auto;
+  color: #4dc3ff;
+  font-size: 1.5rem;
+  line-height: 1;
+  padding-top: 2px;
+}
+
+.did-you-know-body h3 {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  color: #aad8ff;
+  font-size: 1.05rem;
+  margin: 0 0 5px;
+}
+
+.did-you-know-body h3 span {
+  color: #8ab4d6;
+  font-size: 0.75rem;
+  font-weight: normal;
+}
+
+.did-you-know-body p {
+  color: #c0d8e8;
+  line-height: 1.7;
+  margin: 0;
+}
+
 /* 导航栏增加通知图标间距 */
 .nav-links a i {
   margin-right: 5px;
@@ -791,6 +834,7 @@ thead {
 
 /* ===== 运行图页面 ===== */
 .diagram-container {
+    width: 100%;
     max-width: 1000px;
     margin: 0 auto;
     padding: 20px;
@@ -809,12 +853,14 @@ thead {
 }
 
 .diagram-section {
+    max-width: 100%;
     margin-bottom: 40px;
     background: rgba(17, 27, 46, 0.8);
     backdrop-filter: blur(4px);
     border-radius: 16px;
     border: 1px solid rgba(42, 74, 106, 0.5);
     padding: 20px;
+    overflow: hidden;
 }
 
 .diagram-section h3 {
@@ -836,6 +882,101 @@ thead {
     justify-content: center;
     position: relative;
     overflow: hidden;
+}
+
+.diagram-hint {
+    color: #8ab4d6;
+    font-size: 0.9rem;
+    margin: -4px 0 14px;
+}
+
+.diagram-tabs {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-bottom: 16px;
+}
+
+.diagram-tab {
+    -webkit-appearance: none;
+    appearance: none;
+    background: #111b2e;
+    border: 1px solid #2a4a6a;
+    border-radius: 6px;
+    color: #b0cce0;
+    cursor: pointer;
+    font-family: inherit;
+    font-size: 0.9rem;
+    line-height: 1;
+    padding: 9px 16px;
+    transition: background 0.2s, border-color 0.2s, color 0.2s, box-shadow 0.2s;
+}
+
+.diagram-tab:hover {
+    background: #1a2a44;
+    border-color: #4dc3ff;
+    color: #e0f0ff;
+}
+
+.diagram-tab.active {
+    background: linear-gradient(135deg, #1f6d8a, #0f4a6a);
+    border-color: #4dc3ff;
+    color: #ffffff;
+    box-shadow: 0 0 12px rgba(0, 180, 216, 0.3);
+}
+
+.diagram-panels {
+    width: 100%;
+    min-width: 0;
+}
+
+.diagram-panel {
+    width: 100%;
+    min-width: 0;
+    margin: 0;
+}
+
+.diagram-panel[hidden] {
+    display: none;
+}
+
+.diagram-link {
+    display: block;
+    width: 100%;
+    max-width: 100%;
+    position: relative;
+    cursor: zoom-in;
+    border-radius: 8px;
+    overflow: hidden;
+    background: #0a1424;
+    border: 1px solid rgba(77, 195, 255, 0.18);
+}
+
+.diagram-link img {
+    display: block;
+    width: 100%;
+    max-width: 100%;
+    height: auto;
+}
+
+.diagram-panel figcaption {
+    color: #8ab4d6;
+    font-size: 0.85rem;
+    padding-top: 8px;
+    text-align: right;
+}
+
+.diagram-source {
+    color: #8ab4d6;
+    font-size: 0.85rem;
+    margin-top: 8px;
+}
+
+.diagram-source code {
+    background: rgba(77, 195, 255, 0.1);
+    border-radius: 4px;
+    color: #aad8ff;
+    padding: 1px 5px;
 }
 
 .diagram-placeholder {

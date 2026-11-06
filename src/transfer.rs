@@ -76,19 +76,32 @@ pub fn find_transfers(
     let mut arrival_map: HashMap<String, Vec<ArrivalInfo>> = HashMap::new();
     for train in &available {
         let time_offsets = &offsets[&train.id];
-        if let Some(fi) = train.stations.iter().position(|s| s == from) {
+        // 环线车次可能多次经过同一站名，必须按站序中的所有出现位置枚举，
+        // 否则只会取到第一次（对以该站为终点的环线而言就是 0 号位）。
+        for (fi, station) in train.stations.iter().enumerate() {
+            if station != from {
+                continue;
+            }
+            let Some(departure_time) = train.departure_times[fi].as_ref() else {
+                continue;
+            };
+            let Some(dep_offset) = time_offsets[fi].1 else {
+                continue;
+            };
+            if now >= offset_datetime(travel_date, dep_offset) {
+                continue;
+            }
+
             for i in (fi + 1)..train.stations.len() {
                 let x = &train.stations[i];
+                // 同站上下车不构成出行，跳过环线绕回起点的情况。
+                if x == from {
+                    continue;
+                }
                 let Some(arrival_time) = train.arrival_times[i].as_ref() else {
                     continue;
                 };
-                let Some(departure_time) = train.departure_times[fi].as_ref() else {
-                    continue;
-                };
-                let (Some(dep_offset), Some(_)) = (time_offsets[fi].1, time_offsets[i].0) else {
-                    continue;
-                };
-                if now >= offset_datetime(travel_date, dep_offset) {
+                if time_offsets[i].0.is_none() {
                     continue;
                 }
 
@@ -113,13 +126,25 @@ pub fn find_transfers(
     let mut departure_map: HashMap<String, Vec<DepartureInfo>> = HashMap::new();
     for train in &available {
         let time_offsets = &offsets[&train.id];
-        if let Some(ti) = train.stations.iter().position(|s| s == to) {
+        // 同理，终点站名可能在环线中出现多次，逐一作为下车位置处理。
+        for (ti, station) in train.stations.iter().enumerate() {
+            if station != to {
+                continue;
+            }
+            let Some(arrival_time) = train.arrival_times[ti].as_ref() else {
+                continue;
+            };
+            if time_offsets[ti].0.is_none() {
+                continue;
+            }
+
             for i in 0..ti {
                 let x = &train.stations[i];
-                let Some(dep_time) = train.departure_times[i].as_ref() else {
+                // 同站上下车不构成出行，跳过环线绕回终点的情况。
+                if x == to {
                     continue;
-                };
-                let Some(arrival_time) = train.arrival_times[ti].as_ref() else {
+                }
+                let Some(dep_time) = train.departure_times[i].as_ref() else {
                     continue;
                 };
                 let Some(dep_offset) = time_offsets[i].1 else {

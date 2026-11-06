@@ -30,6 +30,7 @@ pub use transfer_confirm::transfer_confirm;
 
 use axum::{Router, extract::State, response::{Html, IntoResponse, Response}};
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use tera::Context;
 use crate::state::SharedState;
 
@@ -84,13 +85,34 @@ async fn orders_query(
     }
 }
 
+const DID_YOU_KNOW: &[&str] = &[
+    "原神游戏中，至东国所有的铁路均为单向单线。",
+    "曙光车站和海屑镇西边的支线原本可以通往焰羽谷，该支线已被废弃，现用作列车坟场。",
+    "海屑镇附近的铁路由一群孩子维护，他们被封为铁路大臣。",
+    "原神游戏中，在至东国铁路上运行的列车有两种编成，分别是一节机车挂两节客车和一节机车挂一节客车和一节货车。",
+    "原神游戏中，离开旅行者的专列后，列车会自动移动到某个站的存车线上。",
+    "原神游戏中，列车无法达速通过大枢纽。",
+    "原神游戏中，从新基捷城召唤列车去贝洛沃迪港，列车会走一个巨长无比且相当复杂的交路。"
+];
+
+// 每次刷新通知页时向后轮换一条；服务重启后从第一条重新开始。
+static DID_YOU_KNOW_INDEX: AtomicUsize = AtomicUsize::new(0);
+
 async fn notifications_page(
     State(state): State<SharedState>,
 ) -> Response {
     let notifs = state.notifications.read().await;
+    let fact_index = DID_YOU_KNOW_INDEX.fetch_add(1, Ordering::Relaxed)
+        % DID_YOU_KNOW.len();
     let mut ctx = Context::new();
     ctx.insert("page_title", "通知 - 至冬国铁路");
     ctx.insert("notifications", &*notifs);
+    ctx.insert("did_you_know", DID_YOU_KNOW[fact_index]);
     let html = state.tera.render("notifications.html", &ctx).unwrap();
-    Html(html).into_response()
+    // 禁止缓存，确保每次刷新都能拿到下一条“你知道吗”。
+    (
+        [(axum::http::header::CACHE_CONTROL, "no-store")],
+        Html(html),
+    )
+        .into_response()
 }

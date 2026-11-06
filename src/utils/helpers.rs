@@ -6,28 +6,23 @@ use std::time::SystemTime;
 use tracing::debug;
 
 pub fn find_interval(train: &Train, from: &str, to: &str) -> Option<(usize, usize)> {
-    let from_indices: Vec<usize> = train
-        .stations
-        .iter()
-        .enumerate()
-        .filter(|(_, s)| *s == from)
-        .map(|(i, _)| i)
-        .collect();
-    let to_indices: Vec<usize> = train
-        .stations
-        .iter()
-        .enumerate()
-        .filter(|(_, s)| *s == to)
-        .map(|(i, _)| i)
-        .collect();
-    for &fi in &from_indices {
-        for &ti in &to_indices {
-            if fi < ti {
-                return Some((fi, ti));
+    // 环线车次可能多次停靠同一站名。这里在所有“先经过 from、后到达 to”
+    // 的组合中选停站区间最短的一段，避免把整圈绕行当成唯一直达方案。
+    let mut best: Option<(usize, usize)> = None;
+    for (fi, station) in train.stations.iter().enumerate() {
+        if station != from {
+            continue;
+        }
+        for (ti, target) in train.stations.iter().enumerate().skip(fi + 1) {
+            if target != to {
+                continue;
+            }
+            if best.map_or(true, |(bf, bt)| ti - fi < bt - bf) {
+                best = Some((fi, ti));
             }
         }
     }
-    None
+    best
 }
 
 pub fn generate_unique_order_id(orders: &HashMap<String, Order>) -> String {

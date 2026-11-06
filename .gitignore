@@ -1,5 +1,6 @@
 /target
 /logs
+/运行图输出
 orders.json
 order_index.json
 run_server.sh

@@ -13,10 +13,141 @@
 
   <div class="diagram-section">
     <h3>列车运行图</h3>
-    <div class="diagram-image" style="background-image: url('/static/images/路线图v1.png');">
+    <p class="diagram-hint">
+      点击线路标签切换运行图；点击图片可在新标签页查看原图。
+    </p>
+
+    <div class="diagram-tabs" role="tablist" aria-label="线路选择">
+      <button type="button" class="diagram-tab active" id="diagram-tab-south"
+              role="tab" aria-selected="true" aria-controls="diagram-south"
+              data-target="diagram-south">南环线</button>
+      <button type="button" class="diagram-tab" id="diagram-tab-north"
+              role="tab" aria-selected="false" aria-controls="diagram-north"
+              data-target="diagram-north" tabindex="-1">北环线</button>
+      <button type="button" class="diagram-tab" id="diagram-tab-outer"
+              role="tab" aria-selected="false" aria-controls="diagram-outer"
+              data-target="diagram-outer" tabindex="-1">外环线</button>
+      <button type="button" class="diagram-tab" id="diagram-tab-east"
+              role="tab" aria-selected="false" aria-controls="diagram-east"
+              data-target="diagram-east" tabindex="-1">东线</button>
+      <button type="button" class="diagram-tab" id="diagram-tab-central"
+              role="tab" aria-selected="false" aria-controls="diagram-central"
+              data-target="diagram-central" tabindex="-1">中央—新基捷</button>
+      <button type="button" class="diagram-tab" id="diagram-tab-branch"
+              role="tab" aria-selected="false" aria-controls="diagram-branch"
+              data-target="diagram-branch" tabindex="-1">新基捷支线</button>
+    </div>
+
+    <div class="diagram-panels">
+      <figure class="diagram-panel" id="diagram-south" role="tabpanel"
+              aria-labelledby="diagram-tab-south">
+        <a class="diagram-link" href="/static/images/diagrams/train_diagram_south_ring.png"
+           target="_blank" rel="noopener" title="在新标签页查看原图">
+          <img src="/static/images/diagrams/train_diagram_south_ring.png"
+               alt="南环线全周列车运行图" width="3120" height="1690"
+               style="display:block;width:100%;height:auto;max-width:100%;">
+        </a>
+        <figcaption>南环线 · 全周 · 5 列</figcaption>
+      </figure>
+
+      <figure class="diagram-panel" id="diagram-north" role="tabpanel"
+              aria-labelledby="diagram-tab-north" hidden>
+        <a class="diagram-link" href="/static/images/diagrams/train_diagram_north_ring.png"
+           target="_blank" rel="noopener" title="在新标签页查看原图">
+          <img src="/static/images/diagrams/train_diagram_north_ring.png"
+               alt="北环线全周列车运行图" width="3120" height="1690"
+               style="display:block;width:100%;height:auto;max-width:100%;" loading="lazy">
+        </a>
+        <figcaption>北环线 · 全周 · 8 列</figcaption>
+      </figure>
+
+      <figure class="diagram-panel" id="diagram-outer" role="tabpanel"
+              aria-labelledby="diagram-tab-outer" hidden>
+        <a class="diagram-link" href="/static/images/diagrams/train_diagram_outer_ring.png"
+           target="_blank" rel="noopener" title="在新标签页查看原图">
+          <img src="/static/images/diagrams/train_diagram_outer_ring.png"
+               alt="外环线全周列车运行图" width="3120" height="1690"
+               style="display:block;width:100%;height:auto;max-width:100%;" loading="lazy">
+        </a>
+        <figcaption>外环线 · 全周 · 3 列</figcaption>
+      </figure>
+
+      <figure class="diagram-panel" id="diagram-east" role="tabpanel"
+              aria-labelledby="diagram-tab-east" hidden>
+        <a class="diagram-link" href="/static/images/diagrams/train_diagram_east_line.png"
+           target="_blank" rel="noopener" title="在新标签页查看原图">
+          <img src="/static/images/diagrams/train_diagram_east_line.png"
+               alt="东线全周列车运行图" width="3120" height="1690"
+               style="display:block;width:100%;height:auto;max-width:100%;" loading="lazy">
+        </a>
+        <figcaption>东线 · 全周 · 15 列</figcaption>
+      </figure>
+
+      <figure class="diagram-panel" id="diagram-central" role="tabpanel"
+              aria-labelledby="diagram-tab-central" hidden>
+        <a class="diagram-link" href="/static/images/diagrams/train_diagram_central_xinjijie.png"
+           target="_blank" rel="noopener" title="在新标签页查看原图">
+          <img src="/static/images/diagrams/train_diagram_central_xinjijie.png"
+               alt="中央—新基捷全周列车运行图" width="3120" height="1690"
+               style="display:block;width:100%;height:auto;max-width:100%;" loading="lazy">
+        </a>
+        <figcaption>中央—新基捷 · 全周 · 8 列</figcaption>
+      </figure>
+
+      <figure class="diagram-panel" id="diagram-branch" role="tabpanel"
+              aria-labelledby="diagram-tab-branch" hidden>
+        <a class="diagram-link" href="/static/images/diagrams/train_diagram_xinjijie_branch.png"
+           target="_blank" rel="noopener" title="在新标签页查看原图">
+          <img src="/static/images/diagrams/train_diagram_xinjijie_branch.png"
+               alt="新基捷支线全周列车运行图" width="3120" height="1690"
+               style="display:block;width:100%;height:auto;max-width:100%;" loading="lazy">
+        </a>
+        <figcaption>新基捷支线 · 全周 · 16 列</figcaption>
+      </figure>
     </div>
   </div>
 
   <p>火车配线图来自B站up主@Genshigros UID:1740836015</p>
+  <p class="diagram-source">
+    列车运行图由 <code>scripts/train_diagram.py</code> 根据
+    <code>trains.csv</code> 自动生成。
+  </p>
 </div>
+
+<script>
+  (function () {
+    var tabs = Array.prototype.slice.call(document.querySelectorAll('.diagram-tab'));
+    var panels = Array.prototype.slice.call(document.querySelectorAll('.diagram-panel'));
+
+    function activate(tab) {
+      tabs.forEach(function (item) {
+        var selected = item === tab;
+        item.classList.toggle('active', selected);
+        item.setAttribute('aria-selected', selected ? 'true' : 'false');
+        item.tabIndex = selected ? 0 : -1;
+      });
+      panels.forEach(function (panel) {
+        panel.hidden = panel.id !== tab.dataset.target;
+      });
+    }
+
+    tabs.forEach(function (tab) {
+      tab.addEventListener('click', function () {
+        activate(tab);
+      });
+      tab.addEventListener('keydown', function (event) {
+        if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') {
+          return;
+        }
+        event.preventDefault();
+        var index = tabs.indexOf(tab);
+        var next = event.key === 'ArrowRight'
+          ? tabs[(index + 1) % tabs.length]
+          : tabs[(index - 1 + tabs.length) % tabs.length];
+        next.focus();
+        activate(next);
+      });
+    });
+  })();
+</script>
 {% endblock %}

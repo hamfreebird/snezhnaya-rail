@@ -101,7 +101,12 @@
     <hr class="transfer-divider">  <!-- 横线分隔 -->
     {% endfor %}
   {% else %}
+    {% if has_direct %}
+    <p>该区间有直达车次，无需换乘。</p>
+    <p><a class="btn-booking" href="/search?from={{ from }}&to={{ to }}&date={{ selected_date }}&mode=direct">查看直达车次</a></p>
+    {% else %}
     <p>未找到合适的换乘方案。</p>
+    {% endif %}
   {% endif %}
 </div>
 {% else %}

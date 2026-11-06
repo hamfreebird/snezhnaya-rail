@@ -36,9 +36,16 @@ pub async fn search(
     if mode == "transfer" {
         let min_transfer = crate::config::get().timeouts.min_transfer_minutes;
         let plans = find_transfers(&trains, from, to, &base_date, min_transfer);
+        // 个别区间（如中央→白冕宫）物理上只有直达车、无法构造两段换乘。
+        // 此时明确提示“有直达车次”，避免误报为无方案。
+        let has_direct = plans.is_empty()
+            && trains
+                .iter()
+                .any(|t| (t.is_selling || t.is_departed) && find_interval(t, from, to).is_some());
         let mut ctx = Context::new();
         ctx.insert("page_title", "中转换乘方案 - 至冬国铁路");
         ctx.insert("plans", &plans);
+        ctx.insert("has_direct", &has_direct);
         ctx.insert("from", from);
         ctx.insert("to", to);
         ctx.insert("selected_date", &date_str);
